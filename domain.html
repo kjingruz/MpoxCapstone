@@ -1,0 +1,715 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Mpox Detection and Tracking</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        .header {
+            padding-bottom: 1rem;
+            border-bottom: 1px solid #e5e5e5;
+            margin-bottom: 2rem;
+        }
+        .upload-form {
+            max-width: 500px;
+            margin: 0 auto;
+            background-color: #f8f9fa;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.1);
+        }
+        .flash-messages {
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header text-center">
+            <h1>Mpox Detection and Lesion Tracking System</h1>
+            <p class="lead">Upload an image to detect and track mpox lesions</p>
+        </div>
+
+        <div class="flash-messages">
+            {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                    {% for message in messages %}
+                        <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                            {{ message }}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+        </div>
+
+        <div class="upload-form">
+            <form method="post" enctype="multipart/form-data">
+                <div class="mb-3">
+                    <label for="patient_id" class="form-label">Patient ID</label>
+                    <input type="text" class="form-control" id="patient_id" name="patient_id" placeholder="Enter patient ID" required>
+                    <div class="form-text">Used for tracking lesions over time.</div>
+                </div>
+                <div class="mb-3">
+                    <label for="file" class="form-label">Select image file</label>
+                    <input type="file" class="form-control" id="file" name="file" accept=".png,.jpg,.jpeg,.gif" required>
+                </div>
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-primary">Upload and Process</button>
+                </div>
+            </form>
+
+            <div class="mt-4 text-center">
+                <p>Already have patient data?</p>
+                <form action="{{ url_for('patient_history') }}" method="get" class="d-inline">
+                    <div class="input-group">
+                        <input type="text" class="form-control" name="patient_id" placeholder="Enter patient ID" required>
+                        <button type="submit" class="btn btn-secondary">View Patient History</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+<!-- templates/result.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Analysis Results</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        .header {
+            padding-bottom: 1rem;
+            border-bottom: 1px solid #e5e5e5;
+            margin-bottom: 2rem;
+        }
+        .result-card {
+            background-color: #f8f9fa;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        .image-container {
+            text-align: center;
+            margin-bottom: 1.5rem;
+        }
+        .image-container img {
+            max-width: 100%;
+            max-height: 400px;
+            border-radius: 0.5rem;
+        }
+        .confidence-high {
+            color: #198754;
+        }
+        .confidence-medium {
+            color: #fd7e14;
+        }
+        .confidence-low {
+            color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Analysis Results</h1>
+            <p class="lead">Patient ID: {{ patient_id }}</p>
+        </div>
+
+        <div class="row">
+            <div class="col-md-6">
+                <div class="result-card">
+                    <h3>Original Image</h3>
+                    <div class="image-container">
+                        <img src="{{ url_for('static', filename='uploads/' + filename) }}" alt="Uploaded Image">
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="result-card">
+                    <h3>Classification Result</h3>
+                    <p>The image is classified as:
+                        <strong>{{ classification.label }}</strong>
+                    </p>
+                    <p>Confidence:
+                        <span class="
+                            {% if classification.confidence > 90 %}confidence-high
+                            {% elif classification.confidence > 70 %}confidence-medium
+                            {% else %}confidence-low{% endif %}
+                        ">
+                            {{ classification.confidence|round(2) }}%
+                        </span>
+                    </p>
+
+                    {% if classification.is_mpox %}
+                        <div class="alert alert-warning" role="alert">
+                            <h4 class="alert-heading">Mpox Detected!</h4>
+                            <p>The system has detected signs of mpox in the image.</p>
+                        </div>
+                    {% else %}
+                        <div class="alert alert-success" role="alert">
+                            <h4 class="alert-heading">No Mpox Detected</h4>
+                            <p>The system did not detect signs of mpox in the image.</p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        {% if classification.is_mpox and lesion_data %}
+        <div class="row">
+            <div class="col-12">
+                <div class="result-card">
+                    <h3>Lesion Detection Results</h3>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="image-container">
+                                {% if lesion_data.visualization_path %}
+                                <img src="{{ lesion_data.visualization_path }}" alt="Lesion Detection">
+                                {% else %}
+                                <p>Visualization not available</p>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5 class="card-title">Lesion Summary</h5>
+                                    <p class="card-text">
+                                        <strong>Lesion Count:</strong> {{ lesion_data.lesion_count }}<br>
+                                        <strong>Total Affected Area:</strong> {{ lesion_data.total_area|round(2) }} pixels<br>
+                                    </p>
+
+                                    <a href="{{ url_for('patient_history', patient_id=patient_id) }}" class="btn btn-primary">
+                                        View Patient History
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="text-center mt-4">
+            <a href="{{ url_for('index') }}" class="btn btn-secondary">Upload Another Image</a>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+<!-- templates/patient_history.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Patient History</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        .header {
+            padding-bottom: 1rem;
+            border-bottom: 1px solid #e5e5e5;
+            margin-bottom: 2rem;
+        }
+        .history-card {
+            background-color: #f8f9fa;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        .image-container {
+            text-align: center;
+            margin-bottom: 1.5rem;
+        }
+        .image-container img {
+            max-width: 100%;
+            border-radius: 0.5rem;
+        }
+        .trend-positive {
+            color: #198754;
+        }
+        .trend-negative {
+            color: #dc3545;
+        }
+        .trend-neutral {
+            color: #6c757d;
+        }
+        .timeline-item {
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-left: 3px solid #6c757d;
+            background-color: #fff;
+            border-radius: 0.25rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Patient History</h1>
+            <p class="lead">Patient ID: {{ patient_id }}</p>
+        </div>
+
+        <div class="flash-messages">
+            {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                    {% for message in messages %}
+                        <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                            {{ message }}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+        </div>
+
+        {% if progression %}
+        <div class="row">
+            <div class="col-12">
+                <div class="history-card">
+                    <h3>Progression Analysis</h3>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="image-container">
+                                {% if progression.chart_path %}
+                                <img src="{{ progression.chart_path }}" alt="Progression Chart">
+                                {% else %}
+                                <p>Chart not available</p>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5 class="card-title">Summary</h5>
+                                    <p class="card-text">
+                                        <strong>Time Period:</strong> {{ progression.time_period }}<br>
+                                        <strong>Initial Lesion Count:</strong> {{ progression.initial_count }}<br>
+                                        <strong>Current Lesion Count:</strong> {{ progression.final_count }}<br>
+                                        <strong>Change:</strong>
+                                        <span class="
+                                            {% if progression.count_change < 0 %}trend-positive
+                                            {% elif progression.count_change > 0 %}trend-negative
+                                            {% else %}trend-neutral{% endif %}
+                                        ">
+                                            {{ progression.count_change }} ({{ progression.count_change_pct|round(2) }}%)
+                                        </span><br>
+                                        <strong>Initial Total Area:</strong> {{ progression.initial_area|round(2) }} pixels<br>
+                                        <strong>Current Total Area:</strong> {{ progression.final_area|round(2) }} pixels<br>
+                                        <strong>Area Change:</strong>
+                                        <span class="
+                                            {% if progression.area_change < 0 %}trend-positive
+                                            {% elif progression.area_change > 0 %}trend-negative
+                                            {% else %}trend-neutral{% endif %}
+                                        ">
+                                            {{ progression.area_change|round(2) }} ({{ progression.area_change_pct|round(2) }}%)
+                                        </span><br>
+                                        <strong>Overall Status:</strong>
+                                        <span class="
+                                            {% if progression.status == 'Improving' %}trend-positive
+                                            {% elif progression.status == 'Worsening' %}trend-negative
+                                            {% else %}trend-neutral{% endif %}
+                                        ">
+                                            {{ progression.status }}
+                                        </span>
+                                    </p>
+
+                                    <a href="{{ url_for('compare_timepoints', patient_id=patient_id) }}" class="btn btn-primary">
+                                        Compare Timepoints
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="row">
+            <div class="col-12">
+                <div class="history-card">
+                    <h3>Visit Timeline</h3>
+
+                    <div class="timeline">
+                        {% for record in history %}
+                        <div class="timeline-item">
+                            <h5>{{ record.timestamp }}</h5>
+                            <div class="row">
+                                <div class="col-md-4">
+                                    <div class="image-container">
+                                        {% if record.visualization_path %}
+                                        <img src="{{ record.visualization_path }}" alt="Lesion Detection">
+                                        {% else %}
+                                        <p>Image not available</p>
+                                        {% endif %}
+                                    </div>
+                                </div>
+
+                                <div class="col-md-8">
+                                    <p>
+                                        <strong>Lesion Count:</strong> {{ record.lesion_count }}<br>
+                                        <strong>Total Area:</strong> {{ record.total_area|round(2) }} pixels<br>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="text-center mt-4">
+            <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Home</a>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+<!-- templates/compare_select.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Compare Timepoints</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        .header {
+            padding-bottom: 1rem;
+            border-bottom: 1px solid #e5e5e5;
+            margin-bottom: 2rem;
+        }
+        .compare-card {
+            background-color: #f8f9fa;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Compare Timepoints</h1>
+            <p class="lead">Patient ID: {{ patient_id }}</p>
+        </div>
+
+        <div class="flash-messages">
+            {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                    {% for message in messages %}
+                        <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                            {{ message }}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+        </div>
+
+        <div class="row">
+            <div class="col-12">
+                <div class="compare-card">
+                    <h3>Select Timepoints to Compare</h3>
+
+                    <form action="{{ url_for('compare_timepoints', patient_id=patient_id) }}" method="get">
+                        <input type="hidden" name="patient_id" value="{{ patient_id }}">
+
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <label for="timestamp1" class="form-label">First Timepoint</label>
+                                <select class="form-select" id="timestamp1" name="timestamp1" required>
+                                    <option value="">Select a timepoint...</option>
+                                    {% for record in history %}
+                                    <option value="{{ record.timestamp }}">{{ record.timestamp }} ({{ record.lesion_count }} lesions)</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+
+                            <div class="col-md-6">
+                                <label for="timestamp2" class="form-label">Second Timepoint</label>
+                                <select class="form-select" id="timestamp2" name="timestamp2" required>
+                                    <option value="">Select a timepoint...</option>
+                                    {% for record in history %}
+                                    <option value="{{ record.timestamp }}">{{ record.timestamp }} ({{ record.lesion_count }} lesions)</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary">Compare Selected Timepoints</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="text-center mt-4">
+            <a href="{{ url_for('patient_history', patient_id=patient_id) }}" class="btn btn-secondary">Back to Patient History</a>
+            <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Home</a>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+<!-- templates/compare_result.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Comparison Results</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        .header {
+            padding-bottom: 1rem;
+            border-bottom: 1px solid #e5e5e5;
+            margin-bottom: 2rem;
+        }
+        .compare-card {
+            background-color: #f8f9fa;
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        .image-container {
+            text-align: center;
+            margin-bottom: 1.5rem;
+        }
+        .image-container img {
+            max-width: 100%;
+            border-radius: 0.5rem;
+        }
+        .trend-positive {
+            color: #198754;
+        }
+        .trend-negative {
+            color: #dc3545;
+        }
+        .trend-neutral {
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Comparison Results</h1>
+            <p class="lead">Patient ID: {{ patient_id }}</p>
+        </div>
+
+        <div class="row">
+            <div class="col-12">
+                <div class="compare-card">
+                    <h3>Lesion Comparison</h3>
+                    <p>Comparing: <strong>{{ timestamp1 }}</strong> vs <strong>{{ timestamp2 }}</strong></p>
+
+                    <div class="image-container">
+                        {% if match_result.comparison_path %}
+                        <img src="{{ match_result.comparison_path }}" alt="Lesion Comparison">
+                        {% else %}
+                        <p>Comparison visualization not available</p>
+                        {% endif %}
+                    </div>
+
+                    <div class="row mt-4">
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5 class="card-title">Matched Lesions</h5>
+                                    <p class="card-text">
+                                        <strong>Count:</strong> {{ match_result.matched_lesions|length }}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5 class="card-title">New Lesions</h5>
+                                    <p class="card-text">
+                                        <strong>Count:</strong>
+                                        <span class="{% if match_result.new_lesions_count > 0 %}trend-negative{% else %}trend-neutral{% endif %}">
+                                            {{ match_result.new_lesions_count }}
+                                        </span>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5 class="card-title">Disappeared Lesions</h5>
+                                    <p class="card-text">
+                                        <strong>Count:</strong>
+                                        <span class="{% if match_result.disappeared_lesions_count > 0 %}trend-positive{% else %}trend-neutral{% endif %}">
+                                            {{ match_result.disappeared_lesions_count }}
+                                        </span>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% if match_result.matched_lesions %}
+        <div class="row">
+            <div class="col-12">
+                <div class="compare-card">
+                    <h3>Matched Lesions Details</h3>
+
+                    <div class="table-responsive">
+                        <table class="table table-bordered table-hover">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Lesion ID (Before)</th>
+                                    <th>Lesion ID (After)</th>
+                                    <th>Area (Before)</th>
+                                    <th>Area (After)</th>
+                                    <th>Area Change</th>
+                                    <th>Percentage Change</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for match in match_result.matched_lesions %}
+                                <tr>
+                                    <td>{{ match.lesion_id_1 }}</td>
+                                    <td>{{ match.lesion_id_2 }}</td>
+                                    <td>{{ match.area_1|round(2) }}</td>
+                                    <td>{{ match.area_2|round(2) }}</td>
+                                    <td class="
+                                        {% if match.area_change < 0 %}trend-positive
+                                        {% elif match.area_change > 0 %}trend-negative
+                                        {% else %}trend-neutral{% endif %}
+                                    ">
+                                        {{ match.area_change|round(2) }}
+                                    </td>
+                                    <td class="
+                                        {% if match.area_change_pct < 0 %}trend-positive
+                                        {% elif match.area_change_pct > 0 %}trend-negative
+                                        {% else %}trend-neutral{% endif %}
+                                    ">
+                                        {{ match.area_change_pct|round(2) }}%
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="text-center mt-4">
+            <a href="{{ url_for('compare_timepoints', patient_id=patient_id) }}" class="btn btn-primary">Compare Different Timepoints</a>
+            <a href="{{ url_for('patient_history', patient_id=patient_id) }}" class="btn btn-secondary">Back to Patient History</a>
+            <a href="{{ url_for('index') }}" class="btn btn-secondary">Back to Home</a>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+<!-- templates/404.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Page Not Found</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 4rem;
+            text-align: center;
+        }
+        .error-container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="error-container">
+            <h1>Page Not Found</h1>
+            <p class="lead">The requested page could not be found.</p>
+            <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Home</a>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
+<!-- templates/500.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Server Error</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 4rem;
+            text-align: center;
+        }
+        .error-container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="error-container">
+            <h1>Server Error</h1>
+            <p class="lead">Something went wrong on our end. Please try again later.</p>
+            <a href="{{ url_for('index') }}" class="btn btn-primary">Back to Home</a>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
