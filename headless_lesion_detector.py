@@ -135,21 +135,21 @@ class HeadlessLesionDetector:
         }
 
     def create_detection_image(self, image, detections, output_path=None):
-    """
-    Create an enhanced visualization of detected lesions.
-    
-    Args:
-        image: Original image
-        detections: Detection results from detect_lesions
-        output_path: Path to save the visualization
+        """
+        Create an enhanced visualization of detected lesions.
         
-    Returns:
-        Visualization image
-    """
-    # Create a copy of the image for visualization
-    vis_image = image.copy()
-    
-    # Create a separate overlay for the lesion masks
+        Args:
+            image: Original image
+            detections: Detection results from detect_lesions
+            output_path: Path to save the visualization
+            
+        Returns:
+            Visualization image
+        """
+        # Create a copy of the image for visualization
+        vis_image = image.copy()
+        
+        # Create a separate overlay for the lesion masks
         overlay = np.zeros_like(image)
         
         # Draw each lesion with a unique color and proper annotation
