@@ -33,60 +33,97 @@ class HeadlessLesionDetector:
 
     def detect_lesions(self, image):
         """
-        Detect lesions in an image using simple image processing techniques.
-
+        Improved lesion detection algorithm for Mpox lesions.
+        Focus on circular shapes and accurate contour detection.
+        
         Args:
             image: Input image (numpy array, BGR format)
-
+            
         Returns:
             Dictionary with detection results
         """
-        # Convert to grayscale
+        # Create a copy of the original image
+        orig_image = image.copy()
+        
+        # Convert to different color spaces for analysis
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-        # Apply preprocessing to enhance lesions
-        # 1. Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # 2. Apply thresholding based on the selected method
-        if self.threshold_method == 'otsu':
-            # Otsu's thresholding
-            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        elif self.threshold_method == 'adaptive':
-            # Adaptive thresholding
-            thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                          cv2.THRESH_BINARY_INV, 11, 2)
-        else:
-            # Simple thresholding
-            _, thresh = cv2.threshold(blurred, 127, 255, cv2.THRESH_BINARY_INV)
-
-        # 3. Apply morphological operations to clean up the mask
-        kernel = np.ones((5, 5), np.uint8)
-        opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
-
-        # 4. Find contours
-        contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # 5. Filter contours by area
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Step 1: Apply Gaussian blur to reduce noise (use smaller kernel for better detail preservation)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        
+        # Step 2: Use multiple thresholding methods and combine results
+        # 2.1 Otsu's thresholding (good for bimodal images)
+        _, otsu_thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # 2.2 Adaptive thresholding (better for varying lighting conditions)
+        adapt_thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # 2.3 Color-based thresholding (for reddish/darker mpox lesions)
+        # Extract the saturation channel (often helps to isolate skin lesions)
+        s_channel = hsv[:, :, 1]
+        _, sat_thresh = cv2.threshold(s_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Combine thresholding results
+        combined_thresh = cv2.bitwise_or(otsu_thresh, adapt_thresh)
+        
+        # Step 3: Clean up with morphological operations
+        # 3.1 Create smaller, more precise kernels
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        kernel_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        
+        # 3.2 Opening operation to remove noise (erosion followed by dilation)
+        opening = cv2.morphologyEx(combined_thresh, cv2.MORPH_OPEN, kernel_small)
+        
+        # 3.3 Remove small holes inside the lesions
+        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel_medium)
+        
+        # Step 4: Find contours
+        contours, _ = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Step 5: Filter contours based on area, circularity, and convexity
         valid_contours = []
         areas = []
-
+        
         for contour in contours:
+            # Calculate contour area
             area = cv2.contourArea(contour)
-            if self.min_area <= area <= self.max_area:
+            
+            # Skip if area is too small or too large
+            if area < self.min_area or area > self.max_area:
+                continue
+            
+            # Calculate perimeter
+            perimeter = cv2.arcLength(contour, True)
+            
+            # Calculate circularity: 4*pi*area/perimeter^2 (1.0 = perfect circle)
+            # Small value for epsilon to avoid division by zero
+            circularity = (4 * np.pi * area) / (perimeter * perimeter + 1e-6)
+            
+            # Calculate convexity: area / convex hull area
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            convexity = area / (hull_area + 1e-6)
+            
+            # Mpox lesions are generally circular, so filter based on shape metrics
+            if circularity > 0.3 and convexity > 0.7:  # Adjusted thresholds for Mpox lesions
                 valid_contours.append(contour)
                 areas.append(area)
-
-        # Create mask for all lesions
+        
+        # Step 6: Create masks for valid contours
         mask = np.zeros_like(gray)
-        cv2.drawContours(mask, valid_contours, -1, 255, -1)
-
-        # Create bounding boxes
+        
+        for i, contour in enumerate(valid_contours):
+            # Draw filled contour
+            cv2.drawContours(mask, [contour], -1, 255, -1)
+        
+        # Step 7: Create bounding boxes
         boxes = []
         for contour in valid_contours:
             x, y, w, h = cv2.boundingRect(contour)
             boxes.append([x, y, x + w, y + h])
-
+        
         # Return detection results
         return {
             'lesion_count': len(valid_contours),
@@ -98,43 +135,72 @@ class HeadlessLesionDetector:
         }
 
     def create_detection_image(self, image, detections, output_path=None):
-        """
-        Create an image showing the detection results.
-        Avoids using GUI functions that might not be available in headless OpenCV.
-
-        Args:
-            image: Original image
-            detections: Detection results from detect_lesions
-            output_path: Path to save the visualization
-
-        Returns:
-            Visualization image
-        """
-        # Create a copy of the image for visualization
-        vis_image = image.copy()
-
-        # Draw contours
-        cv2.drawContours(vis_image, detections['contours'], -1, (0, 255, 0), 2)
-
-        # Draw bounding boxes and labels
-        for i, box in enumerate(detections['boxes']):
-            x1, y1, x2, y2 = box
-            cv2.rectangle(vis_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
-
-            # Add lesion ID and area
-            area = detections['areas'][i]
-            label = f"#{i+1} ({area:.0f}px)"
-            cv2.putText(vis_image, label, (x1, y1 - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-
-        # Add count and total area at top
-        summary = f"Lesions: {detections['lesion_count']}, Area: {detections['total_area']:.0f}px"
-        cv2.putText(vis_image, summary, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
+    """
+    Create an enhanced visualization of detected lesions.
+    
+    Args:
+        image: Original image
+        detections: Detection results from detect_lesions
+        output_path: Path to save the visualization
+        
+    Returns:
+        Visualization image
+    """
+    # Create a copy of the image for visualization
+    vis_image = image.copy()
+    
+    # Create a separate overlay for the lesion masks
+        overlay = np.zeros_like(image)
+        
+        # Draw each lesion with a unique color and proper annotation
+        for i, (contour, area, box) in enumerate(zip(detections['contours'], 
+                                                   detections['areas'], 
+                                                   detections['boxes'])):
+            # Generate a consistent color for this lesion
+            color_value = (i * 35) % 180 + 40  # Avoid too dark/light colors
+            color = (0, color_value, 255 - color_value)  # BGR format
+            
+            # Draw the contour with proper thickness
+            cv2.drawContours(vis_image, [contour], -1, color, 2)
+            
+            # Fill the contour in the overlay
+            cv2.drawContours(overlay, [contour], -1, color, -1)
+            
+            # Get the center of the contour for labeling
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+            else:
+                # If moments fail, use the box center
+                x, y, x2, y2 = box
+                cX = (x + x2) // 2
+                cY = (y + y2) // 2
+            
+            # Draw lesion ID and area
+            label = f"#{i+1}"
+            cv2.putText(vis_image, label, (cX-15, cY), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+            # Draw size information near the bounding box
+            x, y, x2, y2 = box
+            size_label = f"Area: {area:.0f}px"
+            cv2.putText(vis_image, size_label, (x, y2 + 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        # Blend the overlay with the visualization image
+        alpha = 0.3  # Transparency factor
+        cv2.addWeighted(overlay, alpha, vis_image, 1 - alpha, 0, vis_image)
+        
+        # Draw a summary at the top of the image
+        summary = f"Lesions: {detections['lesion_count']}, Total Area: {detections['total_area']:.0f}px"
+        cv2.putText(vis_image, summary, (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        
         # Save visualization if output path is provided
         if output_path:
             cv2.imwrite(output_path, vis_image)
-
+        
         return vis_image
 
 class HeadlessLesionTracker:
