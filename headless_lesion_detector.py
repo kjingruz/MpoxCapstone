@@ -18,10 +18,10 @@ class HeadlessLesionDetector:
     Headless lesion detector using classical computer vision techniques.
     Works with OpenCV headless without GUI dependencies.
     """
-    def __init__(self, min_area=100, max_area=100000, threshold_method='otsu'):
+    def __init__(self, min_area=50, max_area=100000, threshold_method='otsu'):
         """
         Initialize the detector with parameters.
-
+    
         Args:
             min_area: Minimum lesion area in pixels
             max_area: Maximum lesion area in pixels
