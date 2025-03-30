@@ -107,7 +107,7 @@ class HeadlessLesionDetector:
             convexity = area / (hull_area + 1e-6)
             
             # Mpox lesions are generally circular, so filter based on shape metrics
-            if circularity > 0.3 and convexity > 0.7:  # Adjusted thresholds for Mpox lesions
+            if circularity > 0.2 and convexity > 0.6:  # Adjusted thresholds for Mpox lesions
                 valid_contours.append(contour)
                 areas.append(area)
         
