@@ -160,6 +160,168 @@ class HeadlessLesionDetector:
             'boxes': boxes
         }
 
+    def detect_lesions(self, image):
+        """
+        Enhanced lesion detection algorithm for Mpox lesions.
+        Uses multiple color spaces and techniques to better detect lesions.
+        
+        Args:
+            image: Input image (numpy array, BGR format)
+            
+        Returns:
+            Dictionary with detection results
+        """
+        # Create a copy of the original image
+        orig_image = image.copy()
+        
+        # Convert to different color spaces for analysis
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        
+        # ENHANCEMENT 1: Contrast enhancement
+        # Apply CLAHE for better local contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray_clahe = clahe.apply(gray)
+        
+        # ENHANCEMENT 2: Multi-scale Gaussian filtering
+        # Blur at different scales to capture lesions of different sizes
+        blur1 = cv2.GaussianBlur(gray_clahe, (3, 3), 0)
+        blur2 = cv2.GaussianBlur(gray_clahe, (7, 7), 0)
+        blur_diff = cv2.absdiff(blur1, blur2)  # Difference of Gaussians
+        
+        # ENHANCEMENT 3: Extract color channel information specific to lesions
+        # Extract a and b channels from LAB (more robust color information)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        
+        # Extract V (value) and S (saturation) from HSV
+        h_channel, s_channel, v_channel = cv2.split(hsv)
+        
+        # ENHANCEMENT 4: Create a "redness map" (enhances reddish lesions)
+        b, g, r = cv2.split(image)
+        redness = cv2.subtract(r, (g + b) // 2)  # Higher values for reddish areas
+        
+        # ENHANCEMENT 5: Multi-threshold approach
+        # Apply different thresholding methods
+        
+        # 5.1 Otsu on grayscale
+        _, otsu_thresh = cv2.threshold(blur1, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # 5.2 Adaptive thresholding
+        adapt_thresh = cv2.adaptiveThreshold(blur1, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # 5.3 Threshold on redness
+        _, redness_thresh = cv2.threshold(redness, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 5.4 Threshold on a_channel (redness in LAB space)
+        _, a_thresh = cv2.threshold(a_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 5.5 Threshold on saturation
+        _, s_thresh = cv2.threshold(s_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 5.6 Combine thresholds
+        combined_thresh1 = cv2.bitwise_or(otsu_thresh, adapt_thresh)
+        combined_thresh2 = cv2.bitwise_or(redness_thresh, a_thresh)
+        combined_thresh3 = cv2.bitwise_or(combined_thresh1, combined_thresh2)
+        combined_thresh = cv2.bitwise_or(combined_thresh3, s_thresh)
+        
+        # ENHANCEMENT 6: Improved morphological operations
+        # Create kernels for morphological operations
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        kernel_medium = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        
+        # 6.1 Opening to remove small noise
+        opening = cv2.morphologyEx(combined_thresh, cv2.MORPH_OPEN, kernel_small)
+        
+        # 6.2 Closing to fill holes inside lesions
+        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel_medium)
+        
+        # 6.3 Use tophat to enhance small, bright features (for smaller lesions)
+        tophat = cv2.morphologyEx(gray_clahe, cv2.MORPH_TOPHAT, kernel_large)
+        _, tophat_thresh = cv2.threshold(tophat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # 6.4 Combine with tophat to catch smaller lesions
+        final_mask = cv2.bitwise_or(closing, tophat_thresh)
+        
+        # ENHANCEMENT 7: Watershed to separate touching lesions
+        # Distance transform
+        dist_transform = cv2.distanceTransform(final_mask, cv2.DIST_L2, 3)
+        
+        # Threshold to get markers
+        _, markers = cv2.threshold(dist_transform, 0.4 * dist_transform.max(), 255, cv2.THRESH_BINARY)
+        markers = markers.astype(np.uint8)
+        
+        # Find connected components for watershed seeds
+        contours, _ = cv2.findContours(markers, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        markers = np.zeros(gray.shape, dtype=np.int32)
+        
+        # Draw contours and assign unique indices
+        for i, contour in enumerate(contours):
+            cv2.drawContours(markers, [contour], -1, i + 1, -1)
+        
+        # Apply watershed algorithm if we have markers
+        if len(contours) > 0:
+            cv2.watershed(image, markers)
+            watershed_mask = np.zeros(gray.shape, dtype=np.uint8)
+            watershed_mask[markers > 0] = 255
+            final_mask = cv2.bitwise_or(final_mask, watershed_mask)
+        
+        # Find contours in the final mask
+        contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Filter contours based on area, circularity, and convexity
+        valid_contours = []
+        areas = []
+        
+        for contour in contours:
+            # Calculate contour area
+            area = cv2.contourArea(contour)
+            
+            # Skip if area is too small or too large
+            if area < self.min_area or area > self.max_area:
+                continue
+            
+            # Calculate perimeter
+            perimeter = cv2.arcLength(contour, True)
+            
+            # Calculate circularity: 4*pi*area/perimeter^2 (1.0 = perfect circle)
+            circularity = (4 * np.pi * area) / (perimeter * perimeter + 1e-6)
+            
+            # Calculate convexity: area / convex hull area
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            convexity = area / (hull_area + 1e-6)
+            
+            # Use optimized parameters
+            if circularity > 0.2 and convexity > 0.6:  # Optimized thresholds for Mpox lesions
+                valid_contours.append(contour)
+                areas.append(area)
+        
+        # Create masks for valid contours
+        mask = np.zeros_like(gray)
+        
+        for i, contour in enumerate(valid_contours):
+            # Draw filled contour
+            cv2.drawContours(mask, [contour], -1, 255, -1)
+        
+        # Create bounding boxes
+        boxes = []
+        for contour in valid_contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            boxes.append([x, y, x + w, y + h])
+        
+        # Return detection results
+        return {
+            'lesion_count': len(valid_contours),
+            'contours': valid_contours,
+            'areas': areas,
+            'total_area': sum(areas),
+            'mask': mask,
+            'boxes': boxes
+        }
+
     def create_detection_image(self, image, detections, output_path=None):
         """
         Create an enhanced visualization of detected lesions.
@@ -530,7 +692,7 @@ def process_image(image_path, detector, output_dir=None):
         return None
 
     # Detect lesions
-    detections = detector.detect_lesions(image)
+    detections = detector.detect_mpox_lesions(image)
 
     # Create output directory if needed
     if output_dir and not os.path.exists(output_dir):
