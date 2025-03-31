@@ -38,6 +38,70 @@ class DiceLoss(nn.Module):
         # Return negative dice (we want to maximize dice, minimize loss)
         return 1.0 - dice.mean()
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.8, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.eps = 1e-6
+        
+    def forward(self, inputs, targets):
+        # Ensure targets has the proper shape and type
+        if len(targets.shape) == 3:
+            targets = targets.unsqueeze(1)
+        targets = targets.float()
+        
+        # Get probabilities
+        probs = torch.sigmoid(inputs)
+        
+        # Calculate focal weights
+        pt = targets * probs + (1 - targets) * (1 - probs)
+        focal_weights = (1 - pt) ** self.gamma
+        
+        # Apply weights to BCE loss
+        bce = -targets * torch.log(probs + self.eps) - (1 - targets) * torch.log(1 - probs + self.eps)
+        loss = self.alpha * focal_weights * bce
+        
+        return loss.mean()
+
+
+# Enhanced combined loss with regularization
+class EnhancedCombinedLoss(nn.Module):
+    def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.001):
+        super(EnhancedCombinedLoss, self).__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
+        self.reg_weight = reg_weight
+        self.bce = nn.BCEWithLogitsLoss()
+        self.dice = DiceLoss()
+        self.focal = FocalLoss(alpha=0.8, gamma=2.0)
+        
+    def forward(self, logits, targets, model=None):
+        # Ensure targets has the same shape as logits
+        if len(targets.shape) == 3:
+            targets = targets.unsqueeze(1)
+        
+        # Ensure float type (critical for loss computation)
+        targets = targets.float()
+        
+        # Calculate individual losses
+        bce_loss = self.bce(logits, targets)
+        dice_loss = self.dice(logits, targets)
+        focal_loss = self.focal(logits, targets)
+        
+        # L2 regularization if model is provided
+        reg_loss = 0.0
+        if model is not None and self.reg_weight > 0:
+            for param in model.parameters():
+                reg_loss += torch.norm(param, 2)
+        
+        # Combined loss
+        return (self.bce_weight * bce_loss + 
+                self.dice_weight * dice_loss + 
+                self.focal_weight * focal_loss + 
+                self.reg_weight * reg_loss)
+
 # Combined loss for better performance
 class CombinedLoss(nn.Module):
     def __init__(self, bce_weight=0.5, dice_weight=0.5):
@@ -79,6 +143,103 @@ def iou_score(preds, targets):
     
     return iou.mean()
 
+def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda'):
+    """Calculate clinical metrics beyond just IoU"""
+    model.eval()
+    
+    total_images = 0
+    total_tp = 0  # True positives (component-wise)
+    total_fp = 0  # False positives (component-wise)
+    total_fn = 0  # False negatives (component-wise)
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            images = batch['image'].to(device)
+            masks = batch['mask'].to(device)
+            
+            # Ensure masks have channel dimension and correct type
+            if len(masks.shape) == 3:
+                masks = masks.unsqueeze(1)
+            
+            # Forward pass
+            outputs = model(images)
+            
+            # Convert to binary predictions
+            preds = (torch.sigmoid(outputs) > threshold).float()
+            
+            # Convert to numpy for connected component analysis
+            batch_size = images.shape[0]
+            for i in range(batch_size):
+                pred = preds[i, 0].cpu().numpy()
+                mask = masks[i, 0].cpu().numpy()
+                
+                # Connected component analysis for prediction
+                pred_labels, pred_count = cv2.connectedComponents(
+                    (pred > 0).astype(np.uint8)
+                )
+                
+                # Connected component analysis for ground truth
+                gt_labels, gt_count = cv2.connectedComponents(
+                    (mask > 0).astype(np.uint8)
+                )
+                
+                # Count matches (true positives)
+                tp = 0
+                matched_pred = set()
+                
+                for gt_idx in range(1, gt_count):  # Skip background (0)
+                    gt_mask = (gt_labels == gt_idx)
+                    best_iou = 0
+                    best_pred = -1
+                    
+                    for pred_idx in range(1, pred_count):
+                        if pred_idx in matched_pred:
+                            continue
+                            
+                        pred_mask = (pred_labels == pred_idx)
+                        
+                        # Calculate IoU for this component pair
+                        intersection = np.logical_and(gt_mask, pred_mask).sum()
+                        union = np.logical_or(gt_mask, pred_mask).sum()
+                        iou = intersection / union if union > 0 else 0
+                        
+                        if iou > 0.5 and iou > best_iou:  # 0.5 IoU threshold for match
+                            best_iou = iou
+                            best_pred = pred_idx
+                    
+                    if best_pred != -1:
+                        tp += 1
+                        matched_pred.add(best_pred)
+                
+                # False positives: predicted components that didn't match any ground truth
+                fp = pred_count - 1 - len(matched_pred)  # -1 for background
+                
+                # False negatives: ground truth components that weren't matched
+                fn = gt_count - 1 - tp  # -1 for background
+                
+                total_tp += tp
+                total_fp += fp
+                total_fn += fn
+                total_images += 1
+    
+    # Calculate precision, recall, F1
+    precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
+    recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    
+    # Average lesions per image
+    avg_lesions_true = (total_tp + total_fn) / total_images if total_images > 0 else 0
+    avg_lesions_pred = (total_tp + total_fp) / total_images if total_images > 0 else 0
+    
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'avg_lesions_true': avg_lesions_true,
+        'avg_lesions_pred': avg_lesions_pred,
+        'false_positive_rate': total_fp / total_images if total_images > 0 else 0
+    }
+
 # Training function for one epoch
 def train_epoch(model, dataloader, optimizer, criterion, device):
     model.train()
@@ -102,7 +263,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
             outputs = model(images)
             
             # Calculate loss
-            loss = criterion(outputs, masks)
+            loss = criterion(outputs, masks, model)
             
             # Calculate IoU
             batch_iou = iou_score(outputs, masks)
@@ -395,7 +556,8 @@ def main():
     
     # Create optimizer and loss
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    criterion = CombinedLoss(bce_weight=0.5, dice_weight=0.5)
+    criterion = EnhancedCombinedLoss(bce_weight=0.3, dice_weight=0.5, 
+                                focal_weight=0.2, reg_weight=0.0005)
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
