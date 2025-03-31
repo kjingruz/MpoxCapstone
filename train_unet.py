@@ -164,6 +164,9 @@ def iou_score(preds, targets):
 
 def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda'):
     """Calculate clinical metrics beyond just IoU"""
+    import cv2
+    import numpy as np
+    
     model.eval()
     
     total_images = 0
@@ -180,6 +183,9 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda'):
             if len(masks.shape) == 3:
                 masks = masks.unsqueeze(1)
             
+            # Ensure float type
+            masks = masks.float()
+            
             # Forward pass
             outputs = model(images)
             
@@ -192,54 +198,73 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda'):
                 pred = preds[i, 0].cpu().numpy()
                 mask = masks[i, 0].cpu().numpy()
                 
-                # Connected component analysis for prediction
-                pred_labels, pred_count = cv2.connectedComponents(
-                    (pred > 0).astype(np.uint8)
-                )
+                # Convert to uint8 binary format that OpenCV expects
+                pred_uint8 = (pred > 0).astype(np.uint8)
+                mask_uint8 = (mask > 0).astype(np.uint8)
                 
-                # Connected component analysis for ground truth
-                gt_labels, gt_count = cv2.connectedComponents(
-                    (mask > 0).astype(np.uint8)
-                )
-                
-                # Count matches (true positives)
-                tp = 0
-                matched_pred = set()
-                
-                for gt_idx in range(1, gt_count):  # Skip background (0)
-                    gt_mask = (gt_labels == gt_idx)
-                    best_iou = 0
-                    best_pred = -1
+                try:
+                    # Connected component analysis for prediction
+                    pred_labels, pred_count = cv2.connectedComponents(pred_uint8)
+                    pred_count = int(pred_count)  # Ensure it's a simple integer
                     
-                    for pred_idx in range(1, pred_count):
-                        if pred_idx in matched_pred:
-                            continue
+                    # Connected component analysis for ground truth
+                    gt_labels, gt_count = cv2.connectedComponents(mask_uint8)
+                    gt_count = int(gt_count)  # Ensure it's a simple integer
+                    
+                    # Count matches (true positives)
+                    tp = 0
+                    matched_pred = set()
+                    
+                    for gt_idx in range(1, gt_count):  # Skip background (0)
+                        gt_mask = (gt_labels == gt_idx)
+                        best_iou = 0
+                        best_pred = -1
+                        
+                        for pred_idx in range(1, pred_count):
+                            if pred_idx in matched_pred:
+                                continue
+                                
+                            pred_mask = (pred_labels == pred_idx)
                             
-                        pred_mask = (pred_labels == pred_idx)
+                            # Calculate IoU for this component pair
+                            intersection = np.logical_and(gt_mask, pred_mask).sum()
+                            union = np.logical_or(gt_mask, pred_mask).sum()
+                            iou = intersection / union if union > 0 else 0
+                            
+                            if iou > 0.5 and iou > best_iou:  # 0.5 IoU threshold for match
+                                best_iou = iou
+                                best_pred = pred_idx
                         
-                        # Calculate IoU for this component pair
-                        intersection = np.logical_and(gt_mask, pred_mask).sum()
-                        union = np.logical_or(gt_mask, pred_mask).sum()
-                        iou = intersection / union if union > 0 else 0
-                        
-                        if iou > 0.5 and iou > best_iou:  # 0.5 IoU threshold for match
-                            best_iou = iou
-                            best_pred = pred_idx
+                        if best_pred != -1:
+                            tp += 1
+                            matched_pred.add(best_pred)
                     
-                    if best_pred != -1:
-                        tp += 1
-                        matched_pred.add(best_pred)
-                
-                # False positives: predicted components that didn't match any ground truth
-                fp = pred_count - 1 - len(matched_pred)  # -1 for background
-                
-                # False negatives: ground truth components that weren't matched
-                fn = gt_count - 1 - tp  # -1 for background
-                
-                total_tp += tp
-                total_fp += fp
-                total_fn += fn
-                total_images += 1
+                    # False positives: predicted components that didn't match any ground truth
+                    fp = pred_count - 1 - len(matched_pred)  # -1 for background
+                    
+                    # False negatives: ground truth components that weren't matched
+                    fn = gt_count - 1 - tp  # -1 for background
+                    
+                    total_tp += tp
+                    total_fp += fp
+                    total_fn += fn
+                    total_images += 1
+                    
+                except Exception as e:
+                    print(f"Error processing image in clinical metrics: {e}")
+                    continue
+    
+    # Handle case where no valid images were processed
+    if total_images == 0:
+        print("Warning: No valid images were processed for clinical metrics")
+        return {
+            'precision': 0.0,
+            'recall': 0.0,
+            'f1': 0.0,
+            'avg_lesions_true': 0.0,
+            'avg_lesions_pred': 0.0,
+            'false_positive_rate': 0.0
+        }
     
     # Calculate precision, recall, F1
     precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
@@ -247,8 +272,8 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda'):
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
     
     # Average lesions per image
-    avg_lesions_true = (total_tp + total_fn) / total_images if total_images > 0 else 0
-    avg_lesions_pred = (total_tp + total_fp) / total_images if total_images > 0 else 0
+    avg_lesions_true = (total_tp + total_fn) / total_images
+    avg_lesions_pred = (total_tp + total_fp) / total_images
     
     return {
         'precision': precision,
@@ -256,9 +281,8 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda'):
         'f1': f1,
         'avg_lesions_true': avg_lesions_true,
         'avg_lesions_pred': avg_lesions_pred,
-        'false_positive_rate': total_fp / total_images if total_images > 0 else 0
+        'false_positive_rate': total_fp / total_images
     }
-
 # Training function for one epoch
 def train_epoch(model, dataloader, optimizer, criterion, device):
     model.train()
