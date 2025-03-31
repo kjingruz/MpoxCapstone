@@ -34,18 +34,58 @@ class MpoxLesionSegmenter:
             
         print(f"Using device: {self.device}")
         
-        # Load model
-        self.model = UNet(n_channels=3, n_classes=1, bilinear=True)
+        # Load checkpoint first to determine model type
         checkpoint = torch.load(model_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Check if the checkpoint is from an AttentionUNet based on key names
+        is_attention_unet = any("attn" in key for key in checkpoint['model_state_dict'].keys())
+        
+        if is_attention_unet:
+            print("Detected AttentionUNet model in checkpoint")
+            try:
+                # Try to import AttentionUNet
+                from attention_unet import AttentionUNet
+                self.model = AttentionUNet(n_channels=3, n_classes=1, bilinear=False)
+            except ImportError:
+                print("WARNING: AttentionUNet module not found. Creating a compatible model structure.")
+                # Create a compatible structure if import fails
+                from unet_model import UNet
+                
+                # Load standard UNet and modify it to match AttentionUNet architecture
+                self.model = UNet(n_channels=3, n_classes=1, bilinear=False)
+                
+                # This won't use the attention mechanisms but will at least be compatible
+                print("WARNING: Using standard UNet. Attention mechanisms will not be used.")
+                
+                # This is a partial solution, better to have the actual AttentionUNet available
+                compatible_state_dict = {k: v for k, v in checkpoint['model_state_dict'].items() 
+                                       if not any(x in k for x in ['attn', 'up.weight', 'up.bias'])}
+                checkpoint['model_state_dict'] = compatible_state_dict
+        else:
+            print("Loading standard UNet model")
+            from unet_model import UNet
+            self.model = UNet(n_channels=3, n_classes=1, bilinear=True)
+        
+        # Handle potential loading errors
+        try:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+        except RuntimeError as e:
+            print(f"Error loading state dict: {e}")
+            print("Attempting to load with strict=False...")
+            # Try loading with strict=False as a fallback
+            self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            print("Model loaded with missing or unexpected keys")
+        
         self.model.to(self.device)
         self.model.eval()
         
         # Set image size
         self.img_size = img_size
         
-        print(f"Model loaded successfully! (IoU: {checkpoint.get('val_iou', 'N/A'):.4f})")
+        val_iou = checkpoint.get('val_iou', "N/A")
+        print(f"Model loaded successfully! (IoU: {val_iou})")
 
+    # Rest of the class remains unchanged
     def preprocess_image(self, image):
         """
         Preprocess an image for the model
@@ -78,8 +118,7 @@ class MpoxLesionSegmenter:
         
         return image_tensor
     
-
-    def segment_image(self, image, threshold=0.7):  # Increase threshold from 0.5 to 0.7
+    def segment_image(self, image, threshold=0.7):
         """
         Segment lesions in an image with improved filtering
         
@@ -90,7 +129,25 @@ class MpoxLesionSegmenter:
         Returns:
             Dictionary with mask and contours
         """
-        # [existing code to get predictions]
+        # Get original image dimensions
+        if isinstance(image, np.ndarray):
+            orig_h, orig_w = image.shape[:2]
+        else:
+            orig_w, orig_h = image.size
+        
+        # Preprocess image
+        image_tensor = self.preprocess_image(image)
+        
+        # Move to device
+        image_tensor = image_tensor.to(self.device)
+        
+        # Run inference
+        with torch.no_grad():
+            output = self.model(image_tensor)
+            pred = torch.sigmoid(output)
+        
+        # Convert to numpy
+        pred_np = pred.squeeze().cpu().numpy()
         
         # Apply threshold
         binary_mask = (pred_np >= threshold).astype(np.uint8) * 255
@@ -106,7 +163,7 @@ class MpoxLesionSegmenter:
         contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         # Filter contours by area and shape
-        min_area = 200  # Increase from 50 to 200 pixels
+        min_area = 200  # Increased from 50 to 200 pixels
         max_eccentricity = 0.95  # Filter out highly elongated shapes (likely false positives)
         filtered_contours = []
         areas = []
@@ -120,11 +177,15 @@ class MpoxLesionSegmenter:
                 
             # Check shape (filter out highly irregular shapes)
             if len(contour) >= 5:  # Ellipse fitting requires at least 5 points
-                ellipse = cv2.fitEllipse(contour)
-                (_, _), (major, minor), _ = ellipse
-                
-                # Skip highly elongated shapes (likely artifacts)
-                if minor > 0 and major/minor > 5:
+                try:
+                    ellipse = cv2.fitEllipse(contour)
+                    (_, _), (major, minor), _ = ellipse
+                    
+                    # Skip highly elongated shapes (likely artifacts)
+                    if minor > 0 and major/minor > 5:
+                        continue
+                except:
+                    # Skip contours that cause ellipse fitting errors
                     continue
                     
                 # Calculate solidity (area / convex hull area)
@@ -135,7 +196,7 @@ class MpoxLesionSegmenter:
                     # Skip shapes with very low solidity (irregular shapes)
                     if solidity < 0.4:
                         continue
-            
+        
             filtered_contours.append(contour)
             areas.append(area)
         
@@ -144,7 +205,7 @@ class MpoxLesionSegmenter:
             'contours': filtered_contours,
             'areas': areas,
             'lesion_count': len(filtered_contours),
-            'total_area': sum(areas)
+            'total_area': sum(areas) if areas else 0
         }
     
     def create_visualization(self, image, segmentation, output_path=None):
