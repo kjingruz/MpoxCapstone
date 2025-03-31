@@ -1,4 +1,3 @@
-# Create a new file called attention_unet.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
