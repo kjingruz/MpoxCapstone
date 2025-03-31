@@ -417,7 +417,7 @@ cp mpox_dataset_fix.py mpox_dataset.py
 # 9) Training parameters
 ###############################################################################
 SEED=42
-MAX_EPOCHS=50
+MAX_EPOCHS=150
 BATCH_SIZE=16
 LEARNING_RATE=0.001
 IMAGE_SIZE=256
