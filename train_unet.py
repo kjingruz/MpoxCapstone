@@ -8,10 +8,19 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from datetime import datetime
 import argparse
+import cv2  # Added import for connected components analysis
 
 # Import our model and dataset
 from unet_model import UNet
 from mpox_dataset import get_data_loaders, MpoxDataset
+
+# Import the attention UNet model if available, otherwise use standard UNet
+try:
+    from attention_unet import AttentionUNet
+    print("Using AttentionUNet model")
+except ImportError:
+    print("AttentionUNet model not found, will use standard UNet instead")
+    AttentionUNet = UNet  # Fallback to standard UNet if AttentionUNet is not available
 
 # Dice loss for better segmentation performance
 class DiceLoss(nn.Module):
@@ -22,6 +31,10 @@ class DiceLoss(nn.Module):
     def forward(self, logits, targets):
         # Apply sigmoid to get 0-1 probabilities
         probs = torch.sigmoid(logits)
+        
+        # Make sure both are float tensors
+        probs = probs.float()
+        targets = targets.float()
         
         # Flatten
         batch_size = probs.shape[0]
@@ -116,6 +129,9 @@ class CombinedLoss(nn.Module):
         if len(targets.shape) == 3:
             targets = targets.unsqueeze(1)
         
+        # Ensure targets is a float tensor
+        targets = targets.float()
+        
         bce_loss = self.bce(logits, targets)
         dice_loss = self.dice(logits, targets)
         return self.bce_weight * bce_loss + self.dice_weight * dice_loss
@@ -128,6 +144,9 @@ def iou_score(preds, targets):
     # Ensure targets has channel dimension for consistent shape
     if len(targets.shape) == 3:
         targets = targets.unsqueeze(1)
+    
+    # Ensure targets is a float tensor for consistent calculations
+    targets = targets.float()
     
     # Flatten tensors
     batch_size = preds.shape[0]
@@ -256,6 +275,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
             if len(masks.shape) == 3:
                 masks = masks.unsqueeze(1)
             
+            # Ensure float type
+            masks = masks.float()
+            
             # Zero gradients
             optimizer.zero_grad()
             
@@ -299,11 +321,14 @@ def validate(model, dataloader, criterion, device):
             if len(masks.shape) == 3:
                 masks = masks.unsqueeze(1)
             
+            # Ensure float type
+            masks = masks.float()
+            
             # Forward pass
             outputs = model(images)
             
-            # Calculate loss
-            loss = criterion(outputs, masks)
+            # Calculate loss - pass model for regularization, same as in training
+            loss = criterion(outputs, masks, model)
             
             # Calculate IoU
             batch_iou = iou_score(outputs, masks)
@@ -395,17 +420,19 @@ def visualize_predictions(model, dataloader, device, num_samples=3, output_dir=N
 # Main training loop
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler,
                 num_epochs, device, checkpoint_dir, log_interval=1,
-                early_stopping_patience=10):
+                early_stopping_patience=15):  # Increased patience
     # Initialize training history
     history = {
         'train_loss': [],
         'train_iou': [],
         'val_loss': [],
-        'val_iou': []
+        'val_iou': [],
+        'clinical_metrics': []  # Added clinical metrics tracking
     }
     
     # Early stopping variables
     best_val_iou = 0
+    best_f1_score = 0  # Added tracking for best F1 score
     patience_counter = 0
     
     # Create checkpoint directory if it doesn't exist
@@ -423,9 +450,24 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # Validate
         val_loss, val_iou = validate(model, val_loader, criterion, device)
         
+        # Calculate clinical metrics every 5 epochs to avoid slowing down training
+        if epoch % 5 == 0 or epoch == num_epochs - 1:
+            clinical_metrics = evaluate_clinical_metrics(model, val_loader, threshold=0.7, device=device)
+            history['clinical_metrics'].append(clinical_metrics)
+            
+            print(f"Clinical Metrics - F1: {clinical_metrics['f1']:.4f}, "
+                  f"Precision: {clinical_metrics['precision']:.4f}, "
+                  f"Recall: {clinical_metrics['recall']:.4f}")
+            print(f"Avg True Lesions: {clinical_metrics['avg_lesions_true']:.2f}, "
+                  f"Avg Predicted Lesions: {clinical_metrics['avg_lesions_pred']:.2f}")
+        else:
+            history['clinical_metrics'].append(None)
+        
         # Update learning rate
-        if scheduler:
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             scheduler.step(val_loss)
+        else:
+            scheduler.step()
         
         # Update history
         history['train_loss'].append(train_loss)
@@ -437,11 +479,26 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         print(f"Train Loss: {train_loss:.4f}, Train IoU: {train_iou:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Val IoU: {val_iou:.4f}")
         
-        # Save checkpoint if this is the best model so far
+        # Check if this is the best model based on IoU
+        should_save = False
+        
+        # Check if this is the best model based on IoU
         if val_iou > best_val_iou:
             best_val_iou = val_iou
+            should_save = True
             patience_counter = 0
-            
+            save_reason = "IoU"
+        
+        # Also check F1 score if clinical metrics were calculated
+        if epoch % 5 == 0 or epoch == num_epochs - 1:
+            if clinical_metrics['f1'] > best_f1_score:
+                best_f1_score = clinical_metrics['f1']
+                should_save = True
+                patience_counter = 0
+                save_reason = "F1 score"
+        
+        # Save checkpoint if this is the best model
+        if should_save:
             # Save checkpoint
             checkpoint_path = os.path.join(checkpoint_dir, f"best_model.pth")
             torch.save({
@@ -450,10 +507,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
                 'val_iou': val_iou,
+                'clinical_metrics': clinical_metrics if epoch % 5 == 0 or epoch == num_epochs - 1 else None,
                 'history': history
             }, checkpoint_path)
             
-            print(f"Saved best model checkpoint (IoU: {val_iou:.4f})")
+            print(f"Saved best model checkpoint (Best {save_reason})")
         else:
             patience_counter += 1
         
@@ -471,14 +529,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
                 'val_iou': val_iou,
+                'clinical_metrics': clinical_metrics if epoch % 5 == 0 or epoch == num_epochs - 1 else None,
                 'history': history
             }, checkpoint_path)
     
     # Plot training history
     plot_path = os.path.join(checkpoint_dir, "training_history.png")
-    plt.figure(figsize=(12, 5))
+    plt.figure(figsize=(18, 5))
     
-    plt.subplot(1, 2, 1)
+    plt.subplot(1, 3, 1)
     plt.plot(history['train_loss'], label='Train')
     plt.plot(history['val_loss'], label='Validation')
     plt.title('Loss')
@@ -486,13 +545,25 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     plt.ylabel('Loss')
     plt.legend()
     
-    plt.subplot(1, 2, 2)
+    plt.subplot(1, 3, 2)
     plt.plot(history['train_iou'], label='Train')
     plt.plot(history['val_iou'], label='Validation')
     plt.title('IoU')
     plt.xlabel('Epoch')
     plt.ylabel('IoU')
     plt.legend()
+    
+    # Plot F1 scores if available
+    plt.subplot(1, 3, 3)
+    f1_scores = [m['f1'] if m is not None else None for m in history['clinical_metrics']]
+    valid_epochs = [i for i, score in enumerate(f1_scores) if score is not None]
+    valid_scores = [score for score in f1_scores if score is not None]
+    
+    if valid_scores:
+        plt.plot(valid_epochs, valid_scores, marker='o', linestyle='-', color='green')
+        plt.title('F1 Score')
+        plt.xlabel('Epoch')
+        plt.ylabel('F1 Score')
     
     plt.tight_layout()
     plt.savefig(plot_path)
@@ -507,13 +578,19 @@ def main():
     parser.add_argument('--images_dir', required=True, help='Directory containing images')
     parser.add_argument('--masks_dir', help='Directory containing mask annotations (optional)')
     parser.add_argument('--output_dir', default='./outputs', help='Output directory for models and results')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size (increased from 8)')
+    parser.add_argument('--epochs', type=int, default=150, help='Number of epochs (increased from 50)')
+    parser.add_argument('--lr', type=float, default=0.0005, help='Learning rate (decreased from 0.001)')
     parser.add_argument('--img_size', type=int, default=256, help='Image size (square)')
     parser.add_argument('--use_pseudo_labels', action='store_true', help='Generate pseudo labels if no masks')
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
+    parser.add_argument('--model_type', default='attention', choices=['attention', 'standard'], 
+                       help='UNet model type to use (attention or standard)')
+    parser.add_argument('--scheduler', default='cosine', choices=['cosine', 'plateau'],
+                       help='Learning rate scheduler to use')
+    parser.add_argument('--threshold', type=float, default=0.7, 
+                       help='Confidence threshold for predictions (increased from 0.5)')
     
     args = parser.parse_args()
     
@@ -536,40 +613,100 @@ def main():
         for arg, value in vars(args).items():
             f.write(f"{arg}: {value}\n")
     
-    # Create data loaders
-    train_loader, val_loader = get_data_loaders(
-        args.images_dir,
-        args.masks_dir,
-        batch_size=args.batch_size,
-        val_split=0.2,
-        use_pseudo_labels=args.use_pseudo_labels,
-        target_size=(args.img_size, args.img_size),
-        num_workers=args.num_workers
-    )
+    # Create data loaders - check if get_data_loaders returns positive class weight
+    try:
+        # Try with the upgraded function that returns pos_weight
+        train_loader, val_loader, pos_weight = get_data_loaders(
+            args.images_dir,
+            args.masks_dir,
+            batch_size=args.batch_size,
+            val_split=0.2,
+            use_pseudo_labels=args.use_pseudo_labels,
+            target_size=(args.img_size, args.img_size),
+            num_workers=args.num_workers
+        )
+        print(f"Using positive class weight: {pos_weight}")
+    except ValueError:
+        # Fall back to the original function
+        train_loader, val_loader = get_data_loaders(
+            args.images_dir,
+            args.masks_dir,
+            batch_size=args.batch_size,
+            val_split=0.2,
+            use_pseudo_labels=args.use_pseudo_labels,
+            target_size=(args.img_size, args.img_size),
+            num_workers=args.num_workers
+        )
+        pos_weight = None
     
     print(f"Training with {len(train_loader.dataset)} images")
     print(f"Validating with {len(val_loader.dataset)} images")
     
-    # Create model - use the enhanced Attention UNet
-    model = AttentionUNet(n_channels=3, n_classes=1, bilinear=False)
+    # Create model based on argument
+    if args.model_type == 'attention':
+        try:
+            model = AttentionUNet(n_channels=3, n_classes=1, bilinear=False)
+            print("Using AttentionUNet model")
+        except NameError:
+            print("AttentionUNet not defined, falling back to standard UNet")
+            model = UNet(n_channels=3, n_classes=1, bilinear=False)
+    else:
+        model = UNet(n_channels=3, n_classes=1, bilinear=False)
+        print("Using standard UNet model")
+        
     model.to(device)
     
     # Create optimizer and loss
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    criterion = EnhancedCombinedLoss(bce_weight=0.3, dice_weight=0.5, 
-                                focal_weight=0.2, reg_weight=0.0005)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    
+    # Create criterion with or without positive class weight
+    if pos_weight is not None:
+        criterion = EnhancedCombinedLoss(
+            bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.0005
+        )
+        print("Using EnhancedCombinedLoss with class weighting")
+    else:
+        criterion = EnhancedCombinedLoss(
+            bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.0005
+        )
+        print("Using EnhancedCombinedLoss without class weighting")
     
     # Learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.1, patience=5, verbose=True
-    )
+    if args.scheduler == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=1e-6
+        )
+        print("Using CosineAnnealingLR scheduler")
+    else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.1, patience=5, verbose=True
+        )
+        print("Using ReduceLROnPlateau scheduler")
     
     # Train the model
     history = train_model(
         model, train_loader, val_loader, criterion, optimizer, scheduler,
         args.epochs, device, checkpoint_dir, log_interval=5,
-        early_stopping_patience=10
+        early_stopping_patience=15  # Increased from 10
     )
+    
+    # Evaluate final model clinical metrics
+    print("\nEvaluating final model clinical metrics...")
+    clinical_metrics = evaluate_clinical_metrics(
+        model, val_loader, threshold=args.threshold, device=device
+    )
+    print(f"Final Clinical Metrics:")
+    print(f"F1 Score: {clinical_metrics['f1']:.4f}")
+    print(f"Precision: {clinical_metrics['precision']:.4f}")
+    print(f"Recall: {clinical_metrics['recall']:.4f}")
+    print(f"Avg True Lesions: {clinical_metrics['avg_lesions_true']:.2f}")
+    print(f"Avg Predicted Lesions: {clinical_metrics['avg_lesions_pred']:.2f}")
+    print(f"False Positive Rate: {clinical_metrics['false_positive_rate']:.4f}")
+    
+    # Save final clinical metrics
+    with open(os.path.join(checkpoint_dir, "final_clinical_metrics.txt"), "w") as f:
+        for metric, value in clinical_metrics.items():
+            f.write(f"{metric}: {value}\n")
     
     # Visualize predictions on validation set
     print("Generating prediction visualizations...")
