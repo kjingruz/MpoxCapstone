@@ -78,9 +78,10 @@ class MpoxLesionSegmenter:
         
         return image_tensor
     
-    def segment_image(self, image, threshold=0.5):
+
+    def segment_image(self, image, threshold=0.7):  # Increase threshold from 0.5 to 0.7
         """
-        Segment lesions in an image
+        Segment lesions in an image with improved filtering
         
         Args:
             image: PIL image or numpy array
@@ -89,25 +90,7 @@ class MpoxLesionSegmenter:
         Returns:
             Dictionary with mask and contours
         """
-        # Get original image dimensions
-        if isinstance(image, np.ndarray):
-            orig_h, orig_w = image.shape[:2]
-        else:
-            orig_w, orig_h = image.size
-        
-        # Preprocess image
-        image_tensor = self.preprocess_image(image)
-        
-        # Move to device
-        image_tensor = image_tensor.to(self.device)
-        
-        # Run inference
-        with torch.no_grad():
-            output = self.model(image_tensor)
-            pred = torch.sigmoid(output)
-        
-        # Convert to numpy
-        pred_np = pred.squeeze().cpu().numpy()
+        # [existing code to get predictions]
         
         # Apply threshold
         binary_mask = (pred_np >= threshold).astype(np.uint8) * 255
@@ -115,19 +98,46 @@ class MpoxLesionSegmenter:
         # Resize back to original dimensions
         binary_mask = cv2.resize(binary_mask, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
         
+        # Apply morphological operations to remove noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)
+        
         # Find contours
         contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Filter contours by area
-        min_area = 50  # Minimum area in pixels
+        # Filter contours by area and shape
+        min_area = 200  # Increase from 50 to 200 pixels
+        max_eccentricity = 0.95  # Filter out highly elongated shapes (likely false positives)
         filtered_contours = []
         areas = []
         
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area >= min_area:
-                filtered_contours.append(contour)
-                areas.append(area)
+            
+            # Check area
+            if area < min_area:
+                continue
+                
+            # Check shape (filter out highly irregular shapes)
+            if len(contour) >= 5:  # Ellipse fitting requires at least 5 points
+                ellipse = cv2.fitEllipse(contour)
+                (_, _), (major, minor), _ = ellipse
+                
+                # Skip highly elongated shapes (likely artifacts)
+                if minor > 0 and major/minor > 5:
+                    continue
+                    
+                # Calculate solidity (area / convex hull area)
+                hull = cv2.convexHull(contour)
+                hull_area = cv2.contourArea(hull)
+                if hull_area > 0:
+                    solidity = area / hull_area
+                    # Skip shapes with very low solidity (irregular shapes)
+                    if solidity < 0.4:
+                        continue
+            
+            filtered_contours.append(contour)
+            areas.append(area)
         
         return {
             'mask': binary_mask,
