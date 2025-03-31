@@ -550,8 +550,8 @@ def main():
     print(f"Training with {len(train_loader.dataset)} images")
     print(f"Validating with {len(val_loader.dataset)} images")
     
-    # Create model
-    model = UNet(n_channels=3, n_classes=1, bilinear=True)
+    # Create model - use the enhanced Attention UNet
+    model = AttentionUNet(n_channels=3, n_classes=1, bilinear=False)
     model.to(device)
     
     # Create optimizer and loss
