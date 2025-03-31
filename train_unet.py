@@ -48,6 +48,10 @@ class CombinedLoss(nn.Module):
         self.dice = DiceLoss()
         
     def forward(self, logits, targets):
+        # Ensure targets has the same shape as logits
+        if len(targets.shape) == 3:
+            targets = targets.unsqueeze(1)
+        
         bce_loss = self.bce(logits, targets)
         dice_loss = self.dice(logits, targets)
         return self.bce_weight * bce_loss + self.dice_weight * dice_loss
@@ -56,6 +60,10 @@ class CombinedLoss(nn.Module):
 def iou_score(preds, targets):
     # Apply sigmoid and threshold to get binary predictions
     preds = (torch.sigmoid(preds) > 0.5).float()
+    
+    # Ensure targets has channel dimension for consistent shape
+    if len(targets.shape) == 3:
+        targets = targets.unsqueeze(1)
     
     # Flatten tensors
     batch_size = preds.shape[0]
@@ -82,6 +90,10 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         for batch in tepoch:
             images = batch['image'].to(device)
             masks = batch['mask'].to(device)
+            
+            # Ensure masks have channel dimension
+            if len(masks.shape) == 3:
+                masks = masks.unsqueeze(1)
             
             # Zero gradients
             optimizer.zero_grad()
@@ -121,6 +133,10 @@ def validate(model, dataloader, criterion, device):
         for batch in dataloader:
             images = batch['image'].to(device)
             masks = batch['mask'].to(device)
+            
+            # Ensure masks have channel dimension
+            if len(masks.shape) == 3:
+                masks = masks.unsqueeze(1)
             
             # Forward pass
             outputs = model(images)
@@ -164,8 +180,14 @@ def visualize_predictions(model, dataloader, device, num_samples=3, output_dir=N
             for j in range(images.shape[0]):
                 # Convert tensors to numpy for visualization
                 image = images[j].cpu().numpy()
-                mask = masks[j].cpu().numpy()
-                pred = preds[j].cpu().numpy()
+                
+                # Ensure mask has the right shape for visualization
+                if len(masks.shape) == 4:
+                    mask = masks[j, 0].cpu().numpy()  # Take channel 0
+                else:
+                    mask = masks[j].cpu().numpy()
+                
+                pred = preds[j, 0].cpu().numpy()  # Take channel 0
                 
                 # Transpose from CHW to HWC for visualization
                 image = np.transpose(image, (1, 2, 0))
@@ -185,12 +207,15 @@ def visualize_predictions(model, dataloader, device, num_samples=3, output_dir=N
                 axes[0].axis('off')
                 
                 # Plot ground truth mask
-                axes[1].imshow(mask[0], cmap='gray')
+                if len(mask.shape) == 3:
+                    axes[1].imshow(mask[0], cmap='gray')
+                else:
+                    axes[1].imshow(mask, cmap='gray')
                 axes[1].set_title('Ground Truth')
                 axes[1].axis('off')
                 
                 # Plot prediction
-                axes[2].imshow(pred[0], cmap='gray')
+                axes[2].imshow(pred, cmap='gray')
                 axes[2].set_title('Prediction')
                 axes[2].axis('off')
                 
@@ -227,6 +252,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         os.makedirs(checkpoint_dir)
     
     # Start training
+    print("Starting training...")
     for epoch in range(num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs}")
         
