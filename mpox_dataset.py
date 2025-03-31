@@ -63,19 +63,28 @@ class MpoxDataset(Dataset):
                 mask = np.array(mask) > 0  # Convert to binary
             else:
                 # No mask found, create empty mask
-                mask = np.zeros(self.target_size, dtype=np.bool_)
+                mask = np.zeros(self.target_size, dtype=np.uint8)  # Changed from bool to uint8
         elif self.use_pseudo_labels:
             # Generate pseudo label using our previous detection approach
             mask = self._generate_pseudo_mask(image_np)
         else:
             # No mask, create empty mask
-            mask = np.zeros(self.target_size, dtype=np.bool_)
+            mask = np.zeros(self.target_size, dtype=np.uint8)  # Changed from bool to uint8
+        
+        # CRITICAL FIX: Convert boolean mask to uint8 before augmentation
+        # OpenCV operations cannot work with boolean arrays
+        if isinstance(mask, np.ndarray) and mask.dtype == bool:
+            mask = mask.astype(np.uint8) * 255
         
         # Apply data augmentation if provided
         if self.aug_transform:
             augmented = self.aug_transform(image=image_np, mask=mask)
             image_np = augmented['image']
             mask = augmented['mask']
+            
+            # Convert mask back to boolean after augmentation if needed
+            if isinstance(mask, np.ndarray) and mask.dtype != bool:
+                mask = mask > 0
         
         # Apply base transforms (normalization, etc.)
         if self.transform:
@@ -125,10 +134,52 @@ class MpoxDataset(Dataset):
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         
-        # Convert to boolean mask
-        mask = cleaned > 0
+        # Convert to uint8 mask instead of boolean to avoid OpenCV issues
+        mask = (cleaned > 0).astype(np.uint8)
         
         return mask
+
+
+class WeightedMpoxDataset(MpoxDataset):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # Calculate class weights once during initialization
+        self.pos_weight = None
+        self.calculate_class_weights()
+        
+    def calculate_class_weights(self):
+        """Calculate positive class weight for imbalanced data"""
+        print("Calculating class weights...")
+        total_pixels = 0
+        positive_pixels = 0
+        
+        # Use a subset for faster calculation if dataset is large
+        max_samples = min(100, len(self))
+        
+        for i in range(max_samples):
+            try:
+                sample = super().__getitem__(i)
+                mask = sample['mask']
+                
+                if isinstance(mask, torch.Tensor):
+                    mask_np = mask.numpy()
+                else:
+                    mask_np = mask
+                
+                total_pixels += mask_np.size
+                positive_pixels += np.sum(mask_np > 0)
+            except Exception as e:
+                print(f"Error processing sample {i}: {e}")
+                continue
+        
+        # Calculate positive class weight (inverse frequency)
+        neg_ratio = (total_pixels - positive_pixels) / total_pixels
+        pos_ratio = positive_pixels / total_pixels
+        self.pos_weight = neg_ratio / pos_ratio if pos_ratio > 0 else 10.0
+        
+        print(f"Class weights calculated: positive class weight = {self.pos_weight:.2f}")
+        print(f"Positive pixels: {positive_pixels}, Total: {total_pixels}, Ratio: {pos_ratio:.4f}")
 
 
 def get_data_loaders(images_dir, masks_dir=None, batch_size=8, val_split=0.2, 
@@ -146,7 +197,7 @@ def get_data_loaders(images_dir, masks_dir=None, batch_size=8, val_split=0.2,
         num_workers (int): Number of workers for data loading
         
     Returns:
-        tuple: (train_loader, val_loader)
+        tuple: (train_loader, val_loader, pos_weight)
     """
     # Create list of image files
     all_images = sorted([f for f in os.listdir(images_dir) 
@@ -234,53 +285,37 @@ def get_data_loaders(images_dir, masks_dir=None, batch_size=8, val_split=0.2,
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
-        # Create custom dataset class with class weighting capability
-        class WeightedMpoxDataset(MpoxDataset):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                
-                # Calculate class weights once during initialization
-                self.pos_weight = None
-                self.calculate_class_weights()
-                
-            def calculate_class_weights(self):
-                """Calculate positive class weight for imbalanced data"""
-                print("Calculating class weights...")
-                total_pixels = 0
-                positive_pixels = 0
-                
-                for i in range(len(self)):
-                    sample = super().__getitem__(i)
-                    mask = sample['mask']
-                    
-                    if isinstance(mask, torch.Tensor):
-                        mask_np = mask.numpy()
-                    else:
-                        mask_np = mask
-                    
-                    total_pixels += mask_np.size
-                    positive_pixels += np.sum(mask_np > 0)
-                
-                # Calculate positive class weight (inverse frequency)
-                neg_ratio = (total_pixels - positive_pixels) / total_pixels
-                pos_ratio = positive_pixels / total_pixels
-                self.pos_weight = neg_ratio / pos_ratio if pos_ratio > 0 else 10.0
-                
-                print(f"Class weights calculated: positive class weight = {self.pos_weight:.2f}")
-                print(f"Positive pixels: {positive_pixels}, Total: {total_pixels}, Ratio: {pos_ratio:.4f}")
         
-        
-        train_dataset = WeightedMpoxDataset(
-            train_dir, masks_dir, transform=None,
-            target_size=target_size, use_pseudo_labels=use_pseudo_labels,
-            aug_transform=train_transform
-        )
-        
-        val_dataset = WeightedMpoxDataset(
-            val_dir, masks_dir, transform=None,
-            target_size=target_size, use_pseudo_labels=use_pseudo_labels,
-            aug_transform=val_transform
-        )
+        # Create datasets with weighted class capabilities
+        try:
+            train_dataset = WeightedMpoxDataset(
+                train_dir, masks_dir, transform=None,
+                target_size=target_size, use_pseudo_labels=use_pseudo_labels,
+                aug_transform=train_transform
+            )
+            
+            val_dataset = WeightedMpoxDataset(
+                val_dir, masks_dir, transform=None,
+                target_size=target_size, use_pseudo_labels=use_pseudo_labels,
+                aug_transform=val_transform
+            )
+            
+            print("Using WeightedMpoxDataset with class weighting")
+        except Exception as e:
+            print(f"Warning: WeightedMpoxDataset failed with error: {e}")
+            print("Falling back to standard MpoxDataset")
+            
+            train_dataset = MpoxDataset(
+                train_dir, masks_dir, transform=None,
+                target_size=target_size, use_pseudo_labels=use_pseudo_labels,
+                aug_transform=train_transform
+            )
+            
+            val_dataset = MpoxDataset(
+                val_dir, masks_dir, transform=None,
+                target_size=target_size, use_pseudo_labels=use_pseudo_labels,
+                aug_transform=val_transform
+            )
         
     except ImportError:
         # Fallback if albumentations is not available
@@ -300,31 +335,33 @@ def get_data_loaders(images_dir, masks_dir=None, batch_size=8, val_split=0.2,
             target_size=target_size, use_pseudo_labels=use_pseudo_labels
         )
     
-    # Create data loaders with weighted random sampling for imbalanced data
-    from torch.utils.data import WeightedRandomSampler
-    
     # Create weighted sampling based on mask statistics
-    def create_weighted_sampler(dataset):
-        # Simple heuristic - give higher weights to images with lesions
-        weights = []
-        for i in range(len(dataset)):
-            sample = dataset[i]
-            mask = sample['mask']
-            
-            if isinstance(mask, torch.Tensor):
-                has_lesions = mask.sum().item() > 0
-            else:
-                has_lesions = np.sum(mask > 0) > 0
-                
-            # Give higher weight to images with lesions
-            weights.append(3.0 if has_lesions else 1.0)
-            
-        return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-    
-    # Use weighted sampler for training (optional)
     use_weighted_sampling = False  # Set to True to enable
     
     if use_weighted_sampling:
+        from torch.utils.data import WeightedRandomSampler
+        
+        def create_weighted_sampler(dataset):
+            # Simple heuristic - give higher weights to images with lesions
+            weights = []
+            for i in range(len(dataset)):
+                try:
+                    sample = dataset[i]
+                    mask = sample['mask']
+                    
+                    if isinstance(mask, torch.Tensor):
+                        has_lesions = mask.sum().item() > 0
+                    else:
+                        has_lesions = np.sum(mask > 0) > 0
+                        
+                    # Give higher weight to images with lesions
+                    weights.append(3.0 if has_lesions else 1.0)
+                except Exception as e:
+                    print(f"Error in sampler for image {i}: {e}")
+                    weights.append(1.0)  # Default weight on error
+                    
+            return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+        
         train_sampler = create_weighted_sampler(train_dataset)
         train_loader = DataLoader(
             train_dataset, batch_size=batch_size, sampler=train_sampler,
