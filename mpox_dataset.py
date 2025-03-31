@@ -197,13 +197,34 @@ def get_data_loaders(images_dir, masks_dir=None, batch_size=8, val_split=0.2,
         import albumentations as A
         from albumentations.pytorch import ToTensorV2
         
-        # Data augmentation for training
+        # More aggressive data augmentation for training
         train_transform = A.Compose([
+            # Geometric transformations
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
-            A.RandomBrightnessContrast(p=0.2),
-            A.GaussianBlur(p=0.2),
+            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=30, p=0.5),
+            
+            # Color transformations
+            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
+            A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=10, p=0.3),
+            A.GaussianBlur(blur_limit=(3, 7), p=0.2),
+            
+            # Add elastic transform to simulate skin deformation
+            A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, p=0.2),
+            
+            # Add grid distortion and optical distortion
+            A.GridDistortion(p=0.2),
+            A.OpticalDistortion(distort_limit=0.2, shift_limit=0.2, p=0.2),
+            
+            # Quality degradation to improve robustness
+            A.ImageCompression(quality_lower=80, quality_upper=100, p=0.2),
+            A.GaussNoise(var_limit=(10, 50), p=0.2),
+            
+            # Cutouts to force model to look at different parts of the image
+            A.CoarseDropout(max_holes=8, max_height=32, max_width=32, fill_value=0, p=0.2),
+            
+            # Normalize and convert to tensor
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
@@ -213,18 +234,54 @@ def get_data_loaders(images_dir, masks_dir=None, batch_size=8, val_split=0.2,
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
+        # Create custom dataset class with class weighting capability
+        class WeightedMpoxDataset(MpoxDataset):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                
+                # Calculate class weights once during initialization
+                self.pos_weight = None
+                self.calculate_class_weights()
+                
+            def calculate_class_weights(self):
+                """Calculate positive class weight for imbalanced data"""
+                print("Calculating class weights...")
+                total_pixels = 0
+                positive_pixels = 0
+                
+                for i in range(len(self)):
+                    sample = super().__getitem__(i)
+                    mask = sample['mask']
+                    
+                    if isinstance(mask, torch.Tensor):
+                        mask_np = mask.numpy()
+                    else:
+                        mask_np = mask
+                    
+                    total_pixels += mask_np.size
+                    positive_pixels += np.sum(mask_np > 0)
+                
+                # Calculate positive class weight (inverse frequency)
+                neg_ratio = (total_pixels - positive_pixels) / total_pixels
+                pos_ratio = positive_pixels / total_pixels
+                self.pos_weight = neg_ratio / pos_ratio if pos_ratio > 0 else 10.0
+                
+                print(f"Class weights calculated: positive class weight = {self.pos_weight:.2f}")
+                print(f"Positive pixels: {positive_pixels}, Total: {total_pixels}, Ratio: {pos_ratio:.4f}")
         
-        train_dataset = MpoxDataset(
+        
+        train_dataset = WeightedMpoxDataset(
             train_dir, masks_dir, transform=None,
             target_size=target_size, use_pseudo_labels=use_pseudo_labels,
             aug_transform=train_transform
         )
         
-        val_dataset = MpoxDataset(
+        val_dataset = WeightedMpoxDataset(
             val_dir, masks_dir, transform=None,
             target_size=target_size, use_pseudo_labels=use_pseudo_labels,
             aug_transform=val_transform
         )
+        
     except ImportError:
         # Fallback if albumentations is not available
         print("Albumentations not available, using basic transforms")
@@ -243,15 +300,47 @@ def get_data_loaders(images_dir, masks_dir=None, batch_size=8, val_split=0.2,
             target_size=target_size, use_pseudo_labels=use_pseudo_labels
         )
     
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, 
-        num_workers=num_workers, pin_memory=True
-    )
+    # Create data loaders with weighted random sampling for imbalanced data
+    from torch.utils.data import WeightedRandomSampler
+    
+    # Create weighted sampling based on mask statistics
+    def create_weighted_sampler(dataset):
+        # Simple heuristic - give higher weights to images with lesions
+        weights = []
+        for i in range(len(dataset)):
+            sample = dataset[i]
+            mask = sample['mask']
+            
+            if isinstance(mask, torch.Tensor):
+                has_lesions = mask.sum().item() > 0
+            else:
+                has_lesions = np.sum(mask > 0) > 0
+                
+            # Give higher weight to images with lesions
+            weights.append(3.0 if has_lesions else 1.0)
+            
+        return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+    
+    # Use weighted sampler for training (optional)
+    use_weighted_sampling = False  # Set to True to enable
+    
+    if use_weighted_sampling:
+        train_sampler = create_weighted_sampler(train_dataset)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, sampler=train_sampler,
+            num_workers=num_workers, pin_memory=True
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, 
+            num_workers=num_workers, pin_memory=True
+        )
     
     val_loader = DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=True
     )
     
-    return train_loader, val_loader
+    # Return the loaders and the positive class weight for loss function
+    pos_weight = getattr(train_dataset, 'pos_weight', None)
+    return train_loader, val_loader, pos_weight
