@@ -555,7 +555,7 @@ def create_datasets(ph2_dir, mpox_dir, target_size=(256, 256)):
     mpox_test_images = os.path.join(mpox_dir)
     mpox_test_masks = None  # Set to None if no masks available, otherwise point to masks dir
     
-    # Data augmentation for training
+    # Enhanced data augmentation for training with better domain adaptation
     train_transform = A.Compose([
         # Geometric transformations
         A.HorizontalFlip(p=0.5),
@@ -563,21 +563,26 @@ def create_datasets(ph2_dir, mpox_dir, target_size=(256, 256)):
         A.RandomRotate90(p=0.5),
         A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=30, p=0.5),
         
-        # Color transformations (enhanced for cross-dataset transfer)
-        A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
-        A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-        A.GaussianBlur(blur_limit=(3, 7), p=0.2),
+        # Enhanced color transformations for domain adaptation
+        A.RandomBrightnessContrast(brightness_limit=0.4, contrast_limit=0.4, p=0.7),
+        A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=40, val_shift_limit=30, p=0.5),
+        A.GaussianBlur(blur_limit=(3, 7), p=0.3),
         
         # Domain adaptation enhancements
-        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
-        A.ToGray(p=0.05),  # Occasionally convert to grayscale
-        A.CLAHE(p=0.3),    # Contrast Limited Adaptive Histogram Equalization
+        A.ColorJitter(brightness=0.2, contrast=0.3, saturation=0.3, hue=0.1, p=0.6),
+        A.ToGray(p=0.1),  # Occasionally convert to grayscale
+        A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.4),  # Enhanced contrast adaptation
         
-        # Elastic transform to simulate skin deformation
-        A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, p=0.2),
+        # Simulate clinical photography variability (more like Mpox dataset)
+        A.GaussNoise(var_limit=(10, 50), p=0.3),
+        A.ImageCompression(quality_lower=60, quality_upper=100, p=0.3),  # Simulate JPEG artifacts
         
-        # Add grid distortion and optical distortion
-        A.GridDistortion(p=0.2),
+        # Lighting changes to simulate different clinical environments
+        A.RandomGamma(gamma_limit=(80, 120), p=0.3),
+        A.RandomBrightness(limit=0.2, p=0.3),
+        
+        # Texture and pattern augmentations
+        A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.2),
         A.OpticalDistortion(distort_limit=0.2, shift_limit=0.2, p=0.2),
         
         # Normalize and convert to tensor
