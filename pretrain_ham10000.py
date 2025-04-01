@@ -11,19 +11,24 @@ import json
 
 # Import our model and HAM10000 loader
 from unet_model import UNet
-from attention_unet import AttentionUNet
+try:
+    from attention_unet import AttentionUNet
+except ImportError:
+    print("AttentionUNet not found, will use standard UNet")
+    AttentionUNet = None
+
 from ham10000_loader import create_ham10000_contrastive_loader
 
 class SimSiam(nn.Module):
     """
     SimSiam model for self-supervised learning
     """
-    def __init__(self, base_encoder, dim=2048, pred_dim=512):
+    def __init__(self, base_encoder, dim=512, pred_dim=128):
         """
         Args:
             base_encoder: backbone model (UNet encoder)
-            dim: feature dimension (2048 by default)
-            pred_dim: hidden dimension of the predictor (512 by default)
+            dim: feature dimension (512 by default)
+            pred_dim: hidden dimension of the predictor (128 by default)
         """
         super(SimSiam, self).__init__()
         
@@ -31,8 +36,10 @@ class SimSiam(nn.Module):
         self.encoder = base_encoder
         
         # Add a projection MLP (g)
+        # Note: UNet bottleneck is usually 1024 channels for base UNet with bilinear=False
+        # Adjust in_channels based on your UNet implementation
         self.projector = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=1),  # No spatial change, just channel projection
+            nn.Conv2d(1024, 512, kernel_size=1),  # No spatial change, just channel projection
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
             nn.Conv2d(512, 512, kernel_size=1),
@@ -40,14 +47,16 @@ class SimSiam(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(512, dim, kernel_size=1),
             nn.BatchNorm2d(dim),
+            # Add global average pooling to get a vector
+            nn.AdaptiveAvgPool2d(1)
         )
         
-        # Add a prediction MLP (h)
+        # Add a prediction MLP (h) - works on flattened vectors
         self.predictor = nn.Sequential(
-            nn.Conv2d(dim, pred_dim, kernel_size=1),
-            nn.BatchNorm2d(pred_dim),
+            nn.Linear(dim, pred_dim),
+            nn.BatchNorm1d(pred_dim),
             nn.ReLU(inplace=True),
-            nn.Conv2d(pred_dim, dim, kernel_size=1)
+            nn.Linear(pred_dim, dim)
         )
         
         # Initialize weights
@@ -63,9 +72,9 @@ class SimSiam(nn.Module):
                 nn.init.constant_(m.bias, 0)
         
         for m in self.predictor.modules():
-            if isinstance(m, nn.Conv2d):
+            if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
+            elif isinstance(m, nn.BatchNorm1d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
     
@@ -85,9 +94,13 @@ class SimSiam(nn.Module):
         f1 = self.encoder(x1)
         f2 = self.encoder(x2)
         
-        # Compute projections
+        # Compute projections - results in (B, dim, 1, 1)
         z1 = self.projector(f1)
         z2 = self.projector(f2)
+        
+        # Reshape to (B, dim) for the predictor
+        z1 = z1.view(z1.size(0), -1)
+        z2 = z2.view(z2.size(0), -1)
         
         # Compute predictions
         p1 = self.predictor(z1)
@@ -238,7 +251,7 @@ def main():
     print(f"Using device: {device}")
     
     # Create UNet model based on argument
-    if args.model_type == 'attention':
+    if args.model_type == 'attention' and AttentionUNet is not None:
         try:
             base_model = AttentionUNet(n_channels=3, n_classes=1, bilinear=False)
             print("Using AttentionUNet model")
