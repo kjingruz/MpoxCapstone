@@ -58,41 +58,42 @@ def check_cuda():
         print("nvidia-smi not found. CUDA might not be installed or available.")
         return None
 
-def setup_environment(env_name="medsam2_env", conda_path=None):
-    """Set up the conda environment for MedSAM2."""
-    # Check if conda is available
-    if conda_path:
-        conda_cmd = os.path.join(conda_path, "conda")
-    else:
-        conda_cmd = "conda"
-    
+def setup_environment_venv(env_path="medsam2_env"):
+    """Set up the virtual environment for MedSAM2 using venv."""
+    # Check if Python is available
     try:
-        subprocess.run([conda_cmd, "--version"], check=True, capture_output=True)
+        subprocess.run(["python3", "--version"], check=True, capture_output=True)
     except (subprocess.SubprocessError, FileNotFoundError):
-        print("Conda not found. Please install Conda or provide the correct path.")
-        return False
+        try:
+            subprocess.run(["python", "--version"], check=True, capture_output=True)
+            python_cmd = "python"
+        except:
+            print("Python not found. Please install Python or provide the correct path.")
+            return False
+    else:
+        python_cmd = "python3"
     
     # Check if environment already exists
-    result = subprocess.run(
-        f"{conda_cmd} env list", shell=True, capture_output=True, text=True
-    )
-    if f"{env_name} " in result.stdout:
-        print(f"Environment {env_name} already exists.")
-        activate_env = input(f"Use existing environment {env_name}? (y/n): ")
+    if os.path.exists(env_path):
+        print(f"Environment {env_path} already exists.")
+        activate_env = input(f"Use existing environment {env_path}? (y/n): ")
         if activate_env.lower() != 'y':
             return False
     else:
         # Create new environment
         if not run_command(
-            f"{conda_cmd} create -n {env_name} python=3.10 -y",
-            "Creating conda environment"
+            f"{python_cmd} -m venv {env_path}",
+            "Creating virtual environment"
         ):
             return False
     
-    # Activate environment and install packages
-    # We need to use a different approach for activation in a script
-    activate_cmd = f"source $(conda info --base)/etc/profile.d/conda.sh && conda activate {env_name} && "
+    # Determine activation command based on platform
+    if sys.platform == 'win32':
+        activate_cmd = f"call {env_path}\\Scripts\\activate && "
+    else:
+        activate_cmd = f"source {env_path}/bin/activate && "
     
+    # Install packages
     # Check CUDA version and install appropriate PyTorch version
     cuda_version = check_cuda()
     if cuda_version:
@@ -112,22 +113,22 @@ def setup_environment(env_name="medsam2_env", conda_path=None):
     ):
         return False
     
-    # Install additional dependencies for image processing
+    # Install additional dependencies
     if not run_command(
         activate_cmd + "pip install matplotlib scipy scikit-image opencv-python tqdm nibabel",
         "Installing additional packages"
     ):
         return False
     
-    # Install Gradio for the UI (optional)
+    # Install Gradio for the UI
     if not run_command(
         activate_cmd + "pip install gradio==3.38.0",
         "Installing Gradio for UI"
     ):
         return False
     
-    print(f"\nEnvironment {env_name} is ready!")
-    print(f"To activate, run: conda activate {env_name}")
+    print(f"\nEnvironment {env_path} is ready!")
+    print(f"To activate, run: source {env_path}/bin/activate")
     return True
 
 def clone_medsam2_repo(target_dir="MedSAM2"):
