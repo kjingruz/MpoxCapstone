@@ -424,16 +424,22 @@ def train_epoch(model, dataloader, optimizer, criterion, device, rank, accumulat
         
         # Update weights only after accumulation_steps
         if (batch_idx + 1) % accumulation_steps == 0 or batch_idx == len(dataloader) - 1:
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             optimizer.zero_grad()
         
-        # Update metrics (use non-normalized loss for reporting)
-        epoch_loss += loss.item() * accumulation_steps
+        # Use non-normalized loss for reporting and history
+        actual_loss = loss.item() * accumulation_steps
+        
+        # Update metrics
+        epoch_loss += actual_loss
         epoch_iou += batch_iou.item()
         
         # Update progress bar (only on rank 0)
         if rank == 0:
-            pbar.set_postfix(loss=loss.item() * accumulation_steps, iou=batch_iou.item())
+            pbar.set_postfix(loss=actual_loss, iou=batch_iou.item())
     
     # Calculate average metrics
     avg_loss = epoch_loss / len(dataloader)
