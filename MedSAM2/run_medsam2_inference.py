@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MedSAM2 inference script for Mpox lesion segmentation.
-This script runs inference using the pre-trained MedSAM2 model on Mpox lesion images.
+This script runs inference using the fine-tuned MedSAM2 model on Mpox lesion images.
 """
 
 import os
@@ -15,18 +15,17 @@ import json
 from tqdm import tqdm
 import torch
 import matplotlib.pyplot as plt
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import torch.nn.functional as F
 
-# Import MedSAM2 related modules from the official repository
+# Import MedSAM2 related modules
 try:
-    from segment_anything_2 import build_sam2_model
-    from segment_anything_2 import SamPredictor
+    from sam2.build_sam import build_sam2
+    from sam2.sam2_image_predictor import SAM2ImagePredictor
 except ImportError:
-    print("Error: segment_anything_2 package not found.")
-    print("Make sure you've installed the official MedSAM2 package from bowang-lab.")
-    print("Run the setup_medsam2.py script first.")
+    print("Error: sam2 package not found.")
+    print("Make sure you've installed the SAM2 package.")
     sys.exit(1)
 
 def ensure_dir(directory):
@@ -43,103 +42,35 @@ def load_npz_file(npz_path):
         print(f"Error loading {npz_path}: {e}")
         return None
 
-def build_medsam2_model(sam2_checkpoint, medsam2_checkpoint=None, model_cfg=None, device="cuda"):
-    """Build and load the MedSAM2 model."""
-    print(f"Building SAM2 model from {sam2_checkpoint}")
+def load_image(image_path, target_size=(1024, 1024)):
+    """Load and preprocess an image."""
+    # Load image
+    image = cv2.imread(str(image_path))
+    if image is None:
+        print(f"Error reading image: {image_path}")
+        return None
     
-    if model_cfg and model_cfg.endswith(".yaml"):
-        # Parse model config from YAML if provided
-        import yaml
-        with open(model_cfg, 'r') as f:
-            cfg = yaml.safe_load(f)
-            backbone_name = cfg.get('backbone_name', 'hiera_base_plus')
-    else:
-        # Guess model type from checkpoint name
-        if "tiny" in sam2_checkpoint:
-            backbone_name = "hiera_tiny"
-        elif "small" in sam2_checkpoint:
-            backbone_name = "hiera_small"
-        elif "base_plus" in sam2_checkpoint:
-            backbone_name = "hiera_base_plus"
-        elif "large" in sam2_checkpoint:
-            backbone_name = "hiera_large"
-        else:
-            print("Could not determine model type from checkpoint name.")
-            print("Using default: hiera_base_plus")
-            backbone_name = "hiera_base_plus"
+    # Convert BGR to RGB
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     
-    # Build the SAM2 model
-    sam2_model = build_sam2_model(
-        checkpoint=sam2_checkpoint,
-        backbone_name=backbone_name
-    )
+    # Resize image (preserve aspect ratio)
+    h, w = image.shape[:2]
+    ratio = min(target_size[0] / h, target_size[1] / w)
+    new_h, new_w = int(h * ratio), int(w * ratio)
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
     
-    # Load MedSAM2 weights if provided
-    if medsam2_checkpoint:
-        print(f"Loading MedSAM2 weights from {medsam2_checkpoint}")
-        checkpoint = torch.load(medsam2_checkpoint, map_location=device)
-        
-        # Check if the checkpoint is a state dict or a full checkpoint
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            sam2_model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            sam2_model.load_state_dict(checkpoint)
+    # Create a black canvas of target size
+    canvas = np.zeros((target_size[0], target_size[1], 3), dtype=np.uint8)
     
-    # Move model to device
-    sam2_model.to(device=device)
-    sam2_model.eval()
+    # Paste the resized image onto the canvas (center it)
+    y_offset = (target_size[0] - new_h) // 2
+    x_offset = (target_size[1] - new_w) // 2
+    canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
     
-    return sam2_model
-
-def run_inference_with_points(predictor, image, points=None, labels=None):
-    """Run MedSAM2 inference with point prompts."""
-    # Set image
-    predictor.set_image(image)
-    
-    # Generate automatic points if not provided
-    if points is None or labels is None:
-        # Use simple method to generate foreground and background points
-        h, w = image.shape[:2]
-        center_y, center_x = h // 2, w // 2
-        
-        # Generate foreground point near the center
-        fg_point = np.array([[center_x, center_y]])
-        fg_label = np.array([1])
-        
-        # Generate background points near the corners
-        margin = min(h, w) // 10
-        bg_points = np.array([
-            [margin, margin],  # Top-left
-            [w - margin, margin],  # Top-right
-            [margin, h - margin],  # Bottom-left
-            [w - margin, h - margin]  # Bottom-right
-        ])
-        bg_labels = np.array([0, 0, 0, 0])
-        
-        # Combine points and labels
-        points = np.vstack([fg_point, bg_points])
-        labels = np.hstack([fg_label, bg_labels])
-    
-    # Convert to tensor
-    points_torch = torch.from_numpy(points).unsqueeze(0).to(predictor.device)
-    labels_torch = torch.from_numpy(labels).unsqueeze(0).to(predictor.device)
-    
-    # Run prediction
-    masks, scores, _ = predictor.predict(
-        point_coords=points_torch,
-        point_labels=labels_torch,
-        multimask_output=True,
-    )
-    
-    # Get best mask
-    best_idx = torch.argmax(scores)
-    mask = masks[best_idx].cpu().numpy()
-    score = scores[best_idx].item()
-    
-    return mask, score
+    return canvas, (h, w), (y_offset, x_offset, new_h, new_w)
 
 def run_inference_with_box(predictor, image, bbox=None, bbox_shift=10):
-    """Run MedSAM2 inference with bounding box prompt."""
+    """Run inference with bounding box prompt."""
     # Set image
     predictor.set_image(image)
     
@@ -178,7 +109,7 @@ def run_inference_with_box(predictor, image, bbox=None, bbox_shift=10):
                 center_x + box_size, center_y + box_size
             ])
     
-    # Convert to tensor
+    # Convert to torch tensor
     bbox_torch = torch.tensor(bbox, device=predictor.device).unsqueeze(0)
     
     # Run prediction
@@ -196,72 +127,63 @@ def run_inference_with_box(predictor, image, bbox=None, bbox_shift=10):
     
     return mask, score, bbox
 
-def process_single_image(npz_path, predictor, prompt_method="box", bbox_shift=10):
+def process_single_image(image_data, predictor, prompt_method="box", bbox_shift=10):
     """Process a single image with MedSAM2."""
-    # Load data
-    data = load_npz_file(npz_path)
-    if data is None:
+    # Case 1: We have a preprocessed npz file
+    if isinstance(image_data, str) and image_data.endswith('.npz'):
+        # Load data
+        data = load_npz_file(image_data)
+        if data is None:
+            return None
+        
+        # Get image and other metadata
+        image = data['image']
+        filename = str(data['filename'])
+        
+        # Get original size for resizing back
+        if 'orig_size' in data:
+            orig_size = tuple(data['orig_size'])
+        else:
+            orig_size = image.shape[:2]
+        
+        # Get optional bbox if available
+        bbox = data.get('bbox', None)
+        
+    # Case 2: We have a raw image file path
+    elif isinstance(image_data, str) and os.path.isfile(image_data):
+        # Load and preprocess image
+        image, orig_size, crop_info = load_image(image_data)
+        if image is None:
+            return None
+        
+        filename = os.path.basename(image_data)
+        bbox = None  # Auto-generate bbox
+        
+    # Case 3: We have a numpy array image
+    elif isinstance(image_data, np.ndarray):
+        image = image_data
+        orig_size = image.shape[:2]
+        filename = "image_array"
+        bbox = None  # Auto-generate bbox
+    
+    else:
+        print(f"Unsupported image data type: {type(image_data)}")
         return None
     
-    # Get image and other metadata
-    image = data['image']
-    filename = str(data['filename'])
-    
-    # Get original size for resizing back
-    if 'orig_size' in data:
-        orig_size = tuple(data['orig_size'])
-    else:
-        orig_size = image.shape[:2]
-    
-    # Run inference based on prompt method
+    # Run inference
     inference_start = time.time()
-    
-    if prompt_method == "box":
-        # Use bounding box for prompting
-        bbox = data['bbox'] if 'bbox' in data else None
-        mask_pred, confidence, bbox_used = run_inference_with_box(
-            predictor, image, bbox, bbox_shift
-        )
-    else:
-        # Use points for prompting
-        points = data['points'] if 'points' in data else None
-        labels = data['labels'] if 'labels' in data else None
-        mask_pred, confidence = run_inference_with_points(
-            predictor, image, points, labels
-        )
-        bbox_used = None
-    
+    mask_pred, confidence, bbox_used = run_inference_with_box(
+        predictor, image, bbox, bbox_shift
+    )
     inference_time = time.time() - inference_start
-    
-    # Get ground truth mask if available for comparison
-    if 'mask' in data:
-        mask_gt = data['mask']
-    else:
-        mask_gt = None
-    
-    # Calculate metrics if ground truth is available
-    if mask_gt is not None:
-        # Calculate Dice score
-        intersection = np.logical_and(mask_pred, mask_gt).sum()
-        dice_score = (2.0 * intersection) / (mask_pred.sum() + mask_gt.sum() + 1e-6)
-        
-        # Calculate IoU (Jaccard)
-        union = np.logical_or(mask_pred, mask_gt).sum()
-        iou_score = intersection / (union + 1e-6)
-    else:
-        dice_score = None
-        iou_score = None
     
     # Create result dictionary
     result = {
-        'npz_path': str(npz_path),
+        'image': image,
         'filename': filename,
         'mask_pred': mask_pred,
-        'mask_gt': mask_gt,
         'confidence': confidence,
         'inference_time': inference_time,
-        'dice_score': dice_score,
-        'iou_score': iou_score,
         'bbox_used': bbox_used,
         'orig_size': orig_size
     }
@@ -284,9 +206,8 @@ def save_results(result, output_dir, save_masks=True, save_visualization=True):
     
     # Create visualization
     if save_visualization:
-        # Get original image
-        npz_data = load_npz_file(result['npz_path'])
-        image = npz_data['image']
+        # Get image
+        image = result['image']
         
         # Create figure
         plt.figure(figsize=(15, 5))
@@ -322,10 +243,6 @@ def save_results(result, output_dir, save_masks=True, save_visualization=True):
         plt.title(f"Overlay (Time: {result['inference_time']:.3f}s)")
         plt.axis('off')
         
-        # Add metrics if available
-        if result['dice_score'] is not None:
-            plt.suptitle(f"Dice: {result['dice_score']:.3f}, IoU: {result['iou_score']:.3f}")
-        
         # Save figure
         plt.tight_layout()
         vis_path = os.path.join(vis_dir, f"{filename}_vis.png")
@@ -334,41 +251,60 @@ def save_results(result, output_dir, save_masks=True, save_visualization=True):
     
     return masks_dir, vis_dir
 
-def run_medsam2_inference(npz_dir, output_dir, sam2_checkpoint, medsam2_checkpoint=None, 
-                         model_cfg=None, prompt_method="box", bbox_shift=10, 
-                         num_workers=4, device="cuda", save_visualization=True):
-    """Run MedSAM2 inference on all images in the npz directory."""
-    # Find all npz files
-    npz_files = list(Path(npz_dir).glob("*.npz"))
-    
-    if len(npz_files) == 0:
-        print(f"No npz files found in {npz_dir}")
+def run_inference(input_dir, output_dir, sam2_checkpoint, medsam2_checkpoint=None, 
+                model_cfg=None, prompt_method="box", bbox_shift=10, 
+                num_workers=4, device="cuda", save_visualization=True):
+    """Run MedSAM2 inference on all images."""
+    # Check if input is a directory or a single file
+    if os.path.isdir(input_dir):
+        # Find all image or npz files
+        input_files = []
+        for ext in ['.npz', '.jpg', '.jpeg', '.png', '.bmp']:
+            input_files.extend(list(Path(input_dir).glob(f"**/*{ext}")))
+        
+        if len(input_files) == 0:
+            print(f"No input files found in {input_dir}")
+            return
+        
+        print(f"Found {len(input_files)} files for inference.")
+    elif os.path.isfile(input_dir):
+        input_files = [Path(input_dir)]
+        print(f"Running inference on single file: {input_dir}")
+    else:
+        print(f"Input path {input_dir} is invalid")
         return
-    
-    print(f"Found {len(npz_files)} images for inference.")
     
     # Create output directory
     ensure_dir(output_dir)
     
-    # Build MedSAM2 model
-    sam2_model = build_medsam2_model(
-        sam2_checkpoint, 
-        medsam2_checkpoint,
-        model_cfg,
-        device
-    )
+    # Build SAM2 model and create predictor
+    print(f"Loading model from {sam2_checkpoint}")
+    sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
+    
+    # Load MedSAM2 weights if provided
+    if medsam2_checkpoint and os.path.isfile(medsam2_checkpoint):
+        print(f"Loading MedSAM2 weights from {medsam2_checkpoint}")
+        checkpoint = torch.load(medsam2_checkpoint, map_location=device)
+        
+        # Check if checkpoint is a full state_dict or a training checkpoint
+        if 'model' in checkpoint:
+            # Training checkpoint format
+            sam2_model.load_state_dict(checkpoint['model'])
+        else:
+            # Direct state_dict format
+            sam2_model.load_state_dict(checkpoint)
     
     # Create predictor
-    predictor = SamPredictor(sam2_model)
+    predictor = SAM2ImagePredictor(sam2_model)
     
     # Process each image
     results = []
     metrics = []
     
-    for npz_path in tqdm(npz_files, desc="Running inference"):
+    for input_file in tqdm(input_files, desc="Running inference"):
         # Process the image
         result = process_single_image(
-            npz_path, 
+            str(input_file), 
             predictor, 
             prompt_method, 
             bbox_shift
@@ -388,8 +324,6 @@ def run_medsam2_inference(npz_dir, output_dir, sam2_checkpoint, medsam2_checkpoi
                 'filename': result['filename'],
                 'confidence': result['confidence'],
                 'inference_time': result['inference_time'],
-                'dice_score': result['dice_score'],
-                'iou_score': result['iou_score'],
             })
     
     # Save metrics to JSON
@@ -403,15 +337,6 @@ def run_medsam2_inference(npz_dir, output_dir, sam2_checkpoint, medsam2_checkpoi
         'avg_inference_time': np.mean([m['inference_time'] for m in metrics]),
     }
     
-    # Only include dice and IoU if available
-    dice_scores = [m['dice_score'] for m in metrics if m['dice_score'] is not None]
-    iou_scores = [m['iou_score'] for m in metrics if m['iou_score'] is not None]
-    
-    if dice_scores:
-        avg_metrics['avg_dice_score'] = np.mean(dice_scores)
-    if iou_scores:
-        avg_metrics['avg_iou_score'] = np.mean(iou_scores)
-    
     # Save average metrics
     avg_metrics_path = os.path.join(output_dir, "avg_metrics.json")
     with open(avg_metrics_path, 'w') as f:
@@ -423,11 +348,6 @@ def run_medsam2_inference(npz_dir, output_dir, sam2_checkpoint, medsam2_checkpoi
     print(f"Average inference time: {avg_metrics['avg_inference_time']:.3f} seconds")
     print(f"Average confidence: {avg_metrics['avg_confidence']:.3f}")
     
-    if 'avg_dice_score' in avg_metrics:
-        print(f"Average Dice score: {avg_metrics['avg_dice_score']:.3f}")
-    if 'avg_iou_score' in avg_metrics:
-        print(f"Average IoU score: {avg_metrics['avg_iou_score']:.3f}")
-    
     print(f"\nResults saved to {output_dir}")
     print(f"Masks saved to {masks_dir}")
     if save_visualization:
@@ -438,11 +358,11 @@ def run_medsam2_inference(npz_dir, output_dir, sam2_checkpoint, medsam2_checkpoi
 
 def main():
     parser = argparse.ArgumentParser(description="Run MedSAM2 inference on Mpox images")
-    parser.add_argument("--npz_dir", required=True, help="Directory containing npz files")
+    parser.add_argument("--input_dir", required=True, help="Directory containing images or npz files")
     parser.add_argument("--output_dir", default="./mpox_results", help="Output directory for results")
     parser.add_argument("--sam2_checkpoint", required=True, help="Path to SAM2 checkpoint")
-    parser.add_argument("--medsam2_checkpoint", default=None, help="Path to MedSAM2 checkpoint")
-    parser.add_argument("--model_cfg", default=None, help="Path to model config YAML file")
+    parser.add_argument("--medsam2_checkpoint", default=None, help="Path to MedSAM2 fine-tuned checkpoint")
+    parser.add_argument("--model_cfg", default="sam2.1_hiera_b+.yaml", help="Path or name of model config file")
     parser.add_argument("--prompt_method", choices=["box", "points"], default="box",
                         help="Method for prompting SAM (box or points)")
     parser.add_argument("--bbox_shift", type=int, default=10,
@@ -462,8 +382,8 @@ def main():
         args.device = "cpu"
     
     # Run inference
-    metrics, avg_metrics = run_medsam2_inference(
-        args.npz_dir,
+    metrics, avg_metrics = run_inference(
+        args.input_dir,
         args.output_dir,
         args.sam2_checkpoint,
         args.medsam2_checkpoint,
