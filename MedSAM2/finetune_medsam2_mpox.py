@@ -346,6 +346,10 @@ def main():
     print(f"Building SAM2 model from {args.sam2_checkpoint}")
     sam2_model = build_sam2(args.model_cfg, args.sam2_checkpoint, device=device)
     medsam2_model = MedSAM2(model=sam2_model)
+    import torch.nn as nn
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs!")
+        medsam2_model = nn.DataParallel(medsam2_model)
     medsam2_model.to(device)
     
     # Print model info
