@@ -149,14 +149,14 @@ mkdir -p ~/.config/matplotlib
 echo "backend: Agg" > ~/.config/matplotlib/matplotlibrc
 
 ###############################################################################
-# 8) Training parameters
+# 8) Training parameters - UPDATED for better results
 ###############################################################################
 BATCH_SIZE=16  # Per GPU
 EPOCHS=100
-LEARNING_RATE=0.001
+LEARNING_RATE=0.002  # Increased for decoder
 IMAGE_SIZE=256
 NUM_WORKERS=4  # Per GPU
-FINE_TUNE_EPOCH=50  # When to unfreeze encoder
+FINE_TUNE_EPOCH=40  # Earlier unfreezing to allow more fine-tuning
 WORLD_SIZE=$NUM_GPUS  # Use all available GPUs
 ACCUMULATION_STEPS=2  # Effectively doubles the batch size
 
