@@ -69,7 +69,8 @@ def create_ham10000_loader(images_dir, batch_size=32, target_size=(256, 256), nu
     """
     # Create strong augmentations for self-supervised learning
     transform = A.Compose([
-        A.RandomResizedCrop(height=target_size[0], width=target_size[1], scale=(0.2, 1.0)),
+        # Use size parameter instead of height/width for compatibility
+        A.RandomResizedCrop(size=target_size, scale=(0.2, 1.0)),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
@@ -168,7 +169,8 @@ def create_ham10000_contrastive_loader(images_dir, batch_size=32, target_size=(2
     """
     # Create strong augmentations for contrastive learning
     transform = A.Compose([
-        A.RandomResizedCrop(height=target_size[0], width=target_size[1], scale=(0.2, 1.0)),
+        # Use size parameter instead of height/width for compatibility
+        A.RandomResizedCrop(size=target_size, scale=(0.2, 1.0)),
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
