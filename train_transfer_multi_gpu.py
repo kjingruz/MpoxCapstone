@@ -24,9 +24,10 @@ except ImportError:
 from unet_encoder import UNetEncoder
 from cross_dataset_loader import GenericLesionDataset
 
-# Loss functions and metrics
+# Improved loss functions with proper regularization and class balancing
+
 class DiceLoss(nn.Module):
-    def __init__(self, smooth=1.0):
+    def __init__(self, smooth=1e-6):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
         
@@ -43,7 +44,7 @@ class DiceLoss(nn.Module):
         probs = probs.view(batch_size, -1)
         targets = targets.view(batch_size, -1)
         
-        # Compute dice score
+        # Compute dice score with numerical stability
         intersection = (probs * targets).sum(dim=1)
         union = probs.sum(dim=1) + targets.sum(dim=1)
         
@@ -54,7 +55,7 @@ class DiceLoss(nn.Module):
         return 1.0 - dice.mean()
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.8, gamma=2.0):
+    def __init__(self, alpha=0.75, gamma=2.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -69,15 +70,77 @@ class FocalLoss(nn.Module):
         # Get probabilities
         probs = torch.sigmoid(inputs)
         
-        # Calculate focal weights
+        # Calculate focal weights with better numerical stability
         pt = targets * probs + (1 - targets) * (1 - probs)
-        focal_weights = (1 - pt) ** self.gamma
+        focal_weights = (1 - pt).pow(self.gamma)
         
-        # Apply weights to BCE loss
-        bce = -targets * torch.log(probs + self.eps) - (1 - targets) * torch.log(1 - probs + self.eps)
-        loss = self.alpha * focal_weights * bce
+        # Use alpha to focus more on reducing false positives (adjust the balance)
+        # Higher alpha gives more weight to positive class (lesions)
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        # Apply weights to BCE loss with clipping for stability
+        bce = -alpha_t * (
+            targets * torch.log(probs.clamp(min=self.eps)) + 
+            (1 - targets) * torch.log((1 - probs).clamp(min=self.eps))
+        )
+        
+        loss = focal_weights * bce
         
         return loss.mean()
+
+# Improved combined loss with proper regularization and class balancing
+class ImprovedCombinedLoss(nn.Module):
+    def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=1e-5, 
+                pos_weight=None, focal_alpha=0.65):
+        super(ImprovedCombinedLoss, self).__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
+        self.reg_weight = reg_weight
+        
+        # Use weighted BCE to address class imbalance
+        if pos_weight is not None:
+            self.bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]))
+        else:
+            self.bce = nn.BCEWithLogitsLoss()
+            
+        self.dice = DiceLoss(smooth=1e-6)  # Smaller smooth value for numerical stability
+        self.focal = FocalLoss(alpha=focal_alpha, gamma=2.0)  # Adjust alpha to focus more on FPs
+        
+    def forward(self, logits, targets, model=None):
+        # Ensure targets has the same shape as logits
+        if len(targets.shape) == 3:
+            targets = targets.unsqueeze(1)
+        
+        # Ensure float type
+        targets = targets.float()
+        
+        # Calculate individual losses
+        bce_loss = self.bce(logits, targets)
+        dice_loss = self.dice(logits, targets)
+        focal_loss = self.focal(logits, targets)
+        
+        # L2 regularization with proper scaling
+        reg_loss = 0.0
+        if model is not None and self.reg_weight > 0:
+            for param in model.parameters():
+                if param.requires_grad:
+                    reg_loss += param.norm(2).square()
+            
+            # Scale regularization based on parameter count
+            param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            if param_count > 0:
+                reg_loss = reg_loss / param_count
+        
+        # Combined loss with better numerical stability
+        combined_loss = (
+            self.bce_weight * bce_loss + 
+            self.dice_weight * dice_loss + 
+            self.focal_weight * focal_loss + 
+            self.reg_weight * reg_loss
+        )
+        
+        return combined_loss
 
 # Enhanced combined loss with regularization
 class EnhancedCombinedLoss(nn.Module):
