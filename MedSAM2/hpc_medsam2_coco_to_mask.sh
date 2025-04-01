@@ -42,7 +42,7 @@ mkdir -p ${MASK_DIR}
 
 # 5) Run COCO to mask conversion
 echo "Converting COCO annotations to binary masks..."
-python ${SCRIPTS_DIR}/coco_to_masks.py \
+python ${SCRIPTS_DIR}/coco_to_masks_simple.py \
     --coco_json ${COCO_FILE} \
     --img_dir ${MPOX_DIR} \
     --output_dir ${MASK_DIR} \
