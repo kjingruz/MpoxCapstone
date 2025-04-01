@@ -32,31 +32,38 @@ mkdir -p ${BASE_DIR}
 mkdir -p ${CHECKPOINT_DIR}
 mkdir -p ${SCRIPTS_DIR}
 
+
 # 3) Load modules
 echo "Loading required modules..."
 module purge
-module load python/3.10
-module load anaconda3
-module load cuda/12.1
-module load cudnn/8.9.5-cuda12
+module load python
+# Check what CUDA modules are available
+echo "Available modules:"
+module avail
 
-# 4) Create and activate conda environment
-echo "Creating conda environment ${ENV_NAME}..."
-conda create -n ${ENV_NAME} python=3.10 -y
+# 4) Create and activate Python virtual environment (venv)
+echo "Creating Python virtual environment ${ENV_NAME}..."
+python -m venv ${BASE_DIR}/${ENV_NAME}
 
-# Set conda environment activation command
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate ${ENV_NAME}
+# Activate the virtual environment
+source ${BASE_DIR}/${ENV_NAME}/bin/activate
 
 # Check if environment was successfully activated
 if [[ $? -ne 0 ]]; then
-    echo "ERROR: Failed to activate conda environment."
+    echo "ERROR: Failed to activate Python virtual environment."
     exit 1
 fi
 
+# Print Python information
+which python
+python --version
+
 # 5) Install PyTorch and dependencies
-echo "Installing PyTorch 2.3.1 with CUDA support..."
-pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+echo "Installing upgrade pip first..."
+pip install --upgrade pip
+
+echo "Installing PyTorch with CUDA support..."
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
 echo "Installing additional dependencies..."
 pip install matplotlib scipy scikit-image opencv-python tqdm nibabel pycocotools
@@ -75,7 +82,16 @@ else
 fi
 
 # 7) Set CUDA_HOME environment variable
-export CUDA_HOME=/usr/local/cuda-12.1
+export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
+if [ -z "${CUDA_HOME}" ]; then
+    # Try to find CUDA location
+    for path in /usr/local/cuda* /opt/cuda*; do
+        if [ -d "${path}" ]; then
+            export CUDA_HOME="${path}"
+            break
+        fi
+    done
+fi
 echo "Setting CUDA_HOME=${CUDA_HOME}"
 
 # 8) Install SAM2 package in development mode
@@ -123,17 +139,22 @@ cat > ${BASE_DIR}/activate_env.sh << EOF
 
 # Load modules
 module purge
-module load python/3.10
-module load anaconda3
-module load cuda/12.1
-module load cudnn/8.9.5-cuda12
+module load python
 
-# Activate conda environment
-source \$(conda info --base)/etc/profile.d/conda.sh
-conda activate ${ENV_NAME}
+# Activate virtual environment
+source ${BASE_DIR}/${ENV_NAME}/bin/activate
 
-# Set CUDA_HOME
-export CUDA_HOME=/usr/local/cuda-12.1
+# Set CUDA_HOME (you may need to adjust this path)
+export CUDA_HOME=\$(dirname \$(dirname \$(which nvcc)))
+if [ -z "\${CUDA_HOME}" ]; then
+    # Try to find CUDA location
+    for path in /usr/local/cuda* /opt/cuda*; do
+        if [ -d "\${path}" ]; then
+            export CUDA_HOME="\${path}"
+            break
+        fi
+    done
+fi
 
 # Print environment info
 echo "MedSAM2 environment activated."
@@ -147,7 +168,6 @@ export MEDSAM2_BASE="${BASE_DIR}"
 export MEDSAM2_CHECKPOINTS="${CHECKPOINT_DIR}"
 export MEDSAM2_DATA="${MPOX_DATA_DIR}"
 EOF
-chmod +x ${BASE_DIR}/activate_env.sh
 
 # 12) Print summary and instructions
 echo "=========================================================="
