@@ -67,6 +67,9 @@ class FocalLoss(nn.Module):
             targets = targets.unsqueeze(1)
         targets = targets.float()
         
+        # Get device from inputs
+        device = inputs.device
+        
         # Get probabilities
         probs = torch.sigmoid(inputs)
         
@@ -74,8 +77,7 @@ class FocalLoss(nn.Module):
         pt = targets * probs + (1 - targets) * (1 - probs)
         focal_weights = (1 - pt).pow(self.gamma)
         
-        # Use alpha to focus more on reducing false positives (adjust the balance)
-        # Higher alpha gives more weight to positive class (lesions)
+        # Create alpha tensor on the same device as inputs
         alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
         
         # Apply weights to BCE loss with clipping for stability
@@ -88,7 +90,56 @@ class FocalLoss(nn.Module):
         
         return loss.mean()
 
-# Improved combined loss with proper regularization and class balancing
+# Enhanced combined loss with regularization
+class EnhancedCombinedLoss(nn.Module):
+    def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.001):
+        super(EnhancedCombinedLoss, self).__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
+        self.reg_weight = reg_weight
+        self.bce = nn.BCEWithLogitsLoss()
+        self.dice = DiceLoss()
+        self.focal = FocalLoss(alpha=0.8, gamma=2.0)
+        
+        # Initialize pos_weight as None, we'll set it based on input device later
+        self.pos_weight = None
+        
+    def forward(self, logits, targets, model=None):
+        # Ensure targets has the same shape as logits
+        if len(targets.shape) == 3:
+            targets = targets.unsqueeze(1)
+        
+        # Ensure float type (critical for loss computation)
+        targets = targets.float()
+        
+        # Get device from inputs to ensure everything is on the same device
+        device = logits.device
+        
+        # Update BCE loss with pos_weight if needed, ensuring it's on the right device
+        if hasattr(self, 'pos_weight') and self.pos_weight is not None:
+            # Create pos_weight tensor on the right device
+            pos_weight = torch.tensor([self.pos_weight], device=device)
+            self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # Calculate individual losses
+        bce_loss = self.bce(logits, targets)
+        dice_loss = self.dice(logits, targets)
+        focal_loss = self.focal(logits, targets)
+        
+        # L2 regularization if model is provided
+        reg_loss = 0.0
+        if model is not None and self.reg_weight > 0:
+            for param in model.parameters():
+                reg_loss += torch.norm(param, 2)
+        
+        # Combined loss
+        return (self.bce_weight * bce_loss + 
+                self.dice_weight * dice_loss + 
+                self.focal_weight * focal_loss + 
+                self.reg_weight * reg_loss)
+        
+# Improved combined loss with proper regularization and device handling
 class ImprovedCombinedLoss(nn.Module):
     def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=1e-5, 
                 pos_weight=None, focal_alpha=0.65):
@@ -97,15 +148,15 @@ class ImprovedCombinedLoss(nn.Module):
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         self.reg_weight = reg_weight
+        self.focal_alpha = focal_alpha
         
-        # Use weighted BCE to address class imbalance
-        if pos_weight is not None:
-            self.bce = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]))
-        else:
-            self.bce = nn.BCEWithLogitsLoss()
-            
-        self.dice = DiceLoss(smooth=1e-6)  # Smaller smooth value for numerical stability
-        self.focal = FocalLoss(alpha=focal_alpha, gamma=2.0)  # Adjust alpha to focus more on FPs
+        # Store pos_weight value but don't create tensor yet
+        self.pos_weight_value = pos_weight
+        
+        # Initialize without pos_weight
+        self.bce = nn.BCEWithLogitsLoss()
+        self.dice = DiceLoss(smooth=1e-6)
+        self.focal = None  # Will initialize in forward pass to match device
         
     def forward(self, logits, targets, model=None):
         # Ensure targets has the same shape as logits
@@ -114,6 +165,21 @@ class ImprovedCombinedLoss(nn.Module):
         
         # Ensure float type
         targets = targets.float()
+        
+        # Get device from inputs to ensure everything is on the same device
+        device = logits.device
+        
+        # Create loss functions on the right device if needed
+        if self.focal is None or self.focal.alpha.device != device:
+            self.focal = FocalLoss(alpha=self.focal_alpha, gamma=2.0)
+            # Move focal loss parameters to the right device
+            if hasattr(self.focal, 'alpha'):
+                self.focal.alpha = self.focal.alpha.to(device)
+        
+        # Create BCEWithLogitsLoss with pos_weight on the right device
+        if self.pos_weight_value is not None:
+            pos_weight = torch.tensor([self.pos_weight_value], device=device)
+            self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         
         # Calculate individual losses
         bce_loss = self.bce(logits, targets)
@@ -141,43 +207,6 @@ class ImprovedCombinedLoss(nn.Module):
         )
         
         return combined_loss
-
-# Enhanced combined loss with regularization
-class EnhancedCombinedLoss(nn.Module):
-    def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.001):
-        super(EnhancedCombinedLoss, self).__init__()
-        self.bce_weight = bce_weight
-        self.dice_weight = dice_weight
-        self.focal_weight = focal_weight
-        self.reg_weight = reg_weight
-        self.bce = nn.BCEWithLogitsLoss()
-        self.dice = DiceLoss()
-        self.focal = FocalLoss(alpha=0.8, gamma=2.0)
-        
-    def forward(self, logits, targets, model=None):
-        # Ensure targets has the same shape as logits
-        if len(targets.shape) == 3:
-            targets = targets.unsqueeze(1)
-        
-        # Ensure float type (critical for loss computation)
-        targets = targets.float()
-        
-        # Calculate individual losses
-        bce_loss = self.bce(logits, targets)
-        dice_loss = self.dice(logits, targets)
-        focal_loss = self.focal(logits, targets)
-        
-        # L2 regularization if model is provided
-        reg_loss = 0.0
-        if model is not None and self.reg_weight > 0:
-            for param in model.parameters():
-                reg_loss += torch.norm(param, 2)
-        
-        # Combined loss
-        return (self.bce_weight * bce_loss + 
-                self.dice_weight * dice_loss + 
-                self.focal_weight * focal_loss + 
-                self.reg_weight * reg_loss)
 
 # Function to calculate IoU (Intersection over Union) metric
 def iou_score(preds, targets):
