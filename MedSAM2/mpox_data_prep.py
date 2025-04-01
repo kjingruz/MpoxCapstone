@@ -17,6 +17,7 @@ import random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 def ensure_dir(directory):
     """Make sure directory exists."""
@@ -432,7 +433,6 @@ def main():
     
     # Save configuration for reference
     config = vars(args)
-    from datetime import datetime
     config['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     with open(os.path.join(args.output_dir, "prep_config.json"), 'w') as f:
