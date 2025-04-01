@@ -99,7 +99,7 @@ class EnhancedCombinedLoss(nn.Module):
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         self.reg_weight = reg_weight
-        pos_weight = torch.ones_like(targets) * 0.3  # Strongly reduce weight for positive predictions
+        pos_weight = torch.ones_like(targets) * 0.2  # Strongly reduce weight for positive predictions
         self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         self.dice = DiceLoss()
         self.focal = FocalLoss(alpha=0.25, gamma=2.0)  # Decrease alpha to reduce false positives
@@ -265,7 +265,7 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, mpox_threshold=0
                 pred = (preds[i, 0] > curr_threshold).float().cpu().numpy()
                 
                 # Apply post-processing to remove small connected components
-                pred = apply_postprocessing(pred, min_size=50)
+                pred = apply_postprocessing(pred, min_size=100)
                 
                 mask = masks[i, 0].cpu().numpy()
                 
@@ -777,21 +777,34 @@ def load_pretrained_encoder(pretrained_path, model_type='standard', device='cuda
     return encoder
 
 def apply_postprocessing(pred_mask, min_size=50):
-    """Remove small connected components that are likely false positives"""
-    # Convert to numpy for processing
+    """Remove small connected components and apply morphological operations"""
+    from scipy import ndimage
+    import cv2
+    
+    # Convert to numpy if needed
     if isinstance(pred_mask, torch.Tensor):
         pred_mask = pred_mask.cpu().numpy()
     
+    # Convert to uint8 for OpenCV operations
+    binary_mask = (pred_mask > 0).astype(np.uint8) * 255
+    
+    # Apply morphological operations to clean up the mask
+    kernel = np.ones((3, 3), np.uint8)
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, kernel)  # Remove small artifacts
+    binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)  # Fill small holes
+    
+    # Convert back to binary
+    binary_mask = binary_mask > 0
+    
     # Label connected components
-    from scipy import ndimage
-    labeled, num_features = ndimage.label(pred_mask)
+    labeled, num_features = ndimage.label(binary_mask)
     
     # Get component sizes
     component_sizes = np.bincount(labeled.ravel())
     
     # Create new mask with only large enough components
-    processed_mask = np.zeros_like(pred_mask)
-    for i in range(1, num_features + 1):  # Skip background (0)
+    processed_mask = np.zeros_like(binary_mask)
+    for i in range(1, num_features + 1):
         if component_sizes[i] >= min_size:
             processed_mask[labeled == i] = 1
     
@@ -1119,6 +1132,29 @@ def train_process(rank, world_size, args):
             else:
                 val_metrics = None
                 test_metrics = None
+
+            # Also evaluate on filtered Mpox dataset (with fewer lesions)
+            filtered_test_loader = create_filtered_test_loader(
+                args.mpox_dir, max_lesions=10, batch_size=args.batch_size,
+                target_size=(args.img_size, args.img_size), num_workers=args.num_workers
+            )
+            
+            filtered_metrics = evaluate_clinical_metrics(
+                model, filtered_test_loader, threshold=best_threshold,
+                device=device, is_distributed=True, rank=rank
+            )
+            
+            if rank == 0:
+                print("\nFiltered Mpox Dataset Metrics (fewer than 10 lesions):")
+                print(f"F1 Score: {filtered_metrics['f1']:.4f}")
+                print(f"Precision: {filtered_metrics['precision']:.4f}")
+                print(f"Recall: {filtered_metrics['recall']:.4f}")
+                
+                # Save visualizations for filtered dataset
+                vis_dir_filtered = os.path.join(run_dir, "mpox_visualizations_filtered")
+                os.makedirs(vis_dir_filtered, exist_ok=True)
+                visualize_predictions(model, filtered_test_loader, device, threshold=best_threshold,
+                                     num_samples=10, output_dir=vis_dir_filtered, rank=rank)
             
             # Update learning rate
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -1143,32 +1179,28 @@ def train_process(rank, world_size, args):
             is_best = False
             save_reason = ""
             
-            if val_iou > best_val_iou:
-                best_val_iou = val_iou
-                is_best = True
-                patience_counter = 0
-                save_reason = "IoU"
-            
-            # Also check F1 score if metrics were calculated
-            if val_metrics is not None and val_metrics['f1'] > best_f1_score:
-                best_f1_score = val_metrics['f1']
-                is_best = True
-                patience_counter = 0
-                save_reason = "F1 score"
-            else:
-                patience_counter += 1
-            
-            # Save checkpoint if best model or at regular intervals
-            if is_best or (epoch + 1) % args.save_interval == 0 or epoch == args.epochs - 1:
-                checkpoint_path = os.path.join(run_dir, f"model_epoch_{epoch+1}.pth")
-                save_checkpoint(
-                    model, optimizer, epoch, val_loss, val_iou,
-                    val_metrics, test_metrics, history, 
-                    checkpoint_path, is_best, rank
-                )
+            if val_metrics is not None:
+                current_f1 = val_metrics['f1']
+                current_precision = val_metrics['precision'] 
                 
-                if rank == 0 and is_best:
-                    print(f"Saved best model checkpoint (Best {save_reason})")
+                # Only consider models with good recall (>90%) to avoid missing lesions
+                if val_metrics['recall'] > 0.90:
+                    if current_precision > best_precision:
+                        best_precision = current_precision
+                        is_best = True
+                        patience_counter = 0
+                        save_reason = "Precision"
+                    
+                    # Also track F1 separately
+                    if current_f1 > best_f1_score:
+                        best_f1_score = current_f1
+                        # Save a separate "best F1" checkpoint
+                        f1_checkpoint_path = os.path.join(run_dir, f"best_f1_model.pth")
+                        save_checkpoint(model, optimizer, epoch, val_loss, val_iou,
+                                        val_metrics, test_metrics, history, 
+                                        f1_checkpoint_path, False, rank)
+                        if rank == 0:
+                            print(f"Saved best F1 model (F1={current_f1:.4f})")
             
             # Early stopping
             if patience_counter >= args.early_stopping_patience:
@@ -1251,6 +1283,68 @@ def train_process(rank, world_size, args):
     finally:
         # Clean up distributed resources
         cleanup_distributed()
+
+def count_lesions_in_mask(mask, min_size=10):
+    """Count the number of separate lesions in a mask"""
+    from scipy import ndimage
+    
+    # Make sure mask is binary
+    if isinstance(mask, torch.Tensor):
+        mask = mask.cpu().numpy()
+    
+    binary_mask = mask > 0
+    
+    # Label connected components
+    labeled, num_features = ndimage.label(binary_mask)
+    
+    # Filter by minimum size to avoid counting noise
+    component_sizes = np.bincount(labeled.ravel())
+    num_valid_lesions = sum(1 for size in component_sizes[1:] if size >= min_size)
+    
+    return num_valid_lesions
+
+# Modify the test dataset creation to filter by lesion count
+def create_filtered_test_loader(mpox_dir, max_lesions=10, batch_size=16, target_size=(256, 256), num_workers=4):
+    """Create a test loader with only images having fewer than max_lesions lesions"""
+    import albumentations as A
+    from albumentations.pytorch import ToTensorV2
+
+    # Create basic dataset
+    full_dataset = GenericLesionDataset(
+        mpox_dir, None, transform=None, target_size=target_size,
+        aug_transform=A.Compose([
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ]), dataset_type="mpox", use_pseudo_labels=True
+    )
+    
+    # Filter dataset
+    filtered_indices = []
+    if rank == 0:
+        print(f"Filtering Mpox dataset for images with fewer than {max_lesions} lesions...")
+    
+    for i in range(len(full_dataset)):
+        sample = full_dataset[i]
+        mask = sample['mask']
+        num_lesions = count_lesions_in_mask(mask)
+        
+        if num_lesions < max_lesions:
+            filtered_indices.append(i)
+    
+    if rank == 0:
+        print(f"Found {len(filtered_indices)} images with fewer than {max_lesions} lesions")
+    
+    # Create a filtered subset
+    from torch.utils.data import Subset
+    filtered_dataset = Subset(full_dataset, filtered_indices)
+    
+    # Create dataloader
+    filtered_loader = torch.utils.data.DataLoader(
+        filtered_dataset, batch_size=batch_size, 
+        shuffle=False, num_workers=num_workers, pin_memory=True
+    )
+    
+    return filtered_loader
 
 def main():
     parser = argparse.ArgumentParser(description='Multi-GPU Transfer Learning with HAM10000 pretrained encoder')
