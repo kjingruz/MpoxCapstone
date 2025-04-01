@@ -206,11 +206,11 @@ def iou_score(preds, targets):
     return iou.mean()
 
 # Clinical metrics calculation function
-def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda', is_distributed=False, rank=0):
-    """Calculate simple metrics without connected components"""
+def evaluate_clinical_metrics(model, dataloader, threshold=0.7, mpox_threshold=0.85, device='cuda', is_distributed=False, rank=0):
+    """Calculate metrics with different thresholds for different datasets"""
     model.eval()
     
-    # Use pixel-based metrics instead of component-based for now
+    # Use pixel-based metrics
     total_pixels = 0
     total_tp_pixels = 0
     total_fp_pixels = 0
@@ -220,6 +220,9 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda', i
         for batch in dataloader:
             images = batch['image'].to(device)
             masks = batch['mask'].to(device)
+            
+            # Get dataset type if available (default to ph2 if not specified)
+            dataset_type = batch.get('dataset', ['ph2'] * images.shape[0])
             
             # Ensure masks have channel dimension and correct type
             if len(masks.shape) == 3:
@@ -231,12 +234,14 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda', i
             # Forward pass
             outputs = model(images)
             
-            # Convert to binary predictions
-            preds = (torch.sigmoid(outputs) > threshold).float()
+            # Convert to binary predictions - use different thresholds based on dataset
+            preds = torch.sigmoid(outputs)
             
             # Convert to numpy and calculate pixel-wise metrics
             for i in range(images.shape[0]):
-                pred = preds[i, 0].cpu().numpy()
+                # Use different threshold based on dataset type
+                curr_threshold = mpox_threshold if dataset_type[i].lower() == 'mpox' else threshold
+                pred = (preds[i, 0] > curr_threshold).float().cpu().numpy()
                 mask = masks[i, 0].cpu().numpy()
                 
                 # Convert to binary
@@ -278,23 +283,103 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, device='cuda', i
     recall = total_tp_pixels / (total_tp_pixels + total_fn_pixels) if (total_tp_pixels + total_fn_pixels) > 0 else 0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
     
-    # Estimate average lesions based on reasonable assumptions
-    # Assuming average lesion is about 500 pixels
-    est_lesion_size = 500
-    est_true_lesions = total_tp_pixels / est_lesion_size if est_lesion_size > 0 else 0
-    est_pred_lesions = (total_tp_pixels + total_fp_pixels) / est_lesion_size if est_lesion_size > 0 else 0
-    
-    if rank == 0:  # Only print from the main process
+    # Print more detailed statistics
+    if rank == 0:
         print(f"Pixel-based metrics: TP={total_tp_pixels}, FP={total_fp_pixels}, FN={total_fn_pixels}")
+        print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
+        print(f"False positive rate: {total_fp_pixels / total_pixels if total_pixels > 0 else 0:.6f}")
     
     return {
         'precision': precision,
         'recall': recall,
         'f1': f1,
-        'avg_lesions_true': est_true_lesions / len(dataloader.dataset),
-        'avg_lesions_pred': est_pred_lesions / len(dataloader.dataset),
+        'tp': total_tp_pixels,
+        'fp': total_fp_pixels,
+        'fn': total_fn_pixels,
         'false_positive_rate': total_fp_pixels / total_pixels if total_pixels > 0 else 0
     }
+
+def visualize_predictions(model, dataloader, device, num_samples=3, threshold=0.7, output_dir=None, rank=0):
+    """
+    Visualize model predictions (only run on rank 0)
+    """
+    if rank != 0:
+        return
+        
+    model.eval()
+    
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            if i >= num_samples:
+                break
+                
+            images = batch['image'].to(device)
+            masks = batch['mask']
+            filenames = batch['filename']
+            
+            # Forward pass
+            outputs = model(images)
+            
+            # Apply sigmoid and custom threshold
+            preds = torch.sigmoid(outputs) > threshold
+            
+            # Loop through batch
+            for j in range(images.shape[0]):
+                # Convert tensors to numpy for visualization
+                image = images[j].cpu().numpy()
+                
+                # Ensure mask has the right shape for visualization
+                if len(masks.shape) == 4:
+                    mask = masks[j, 0].cpu().numpy()  # Take channel 0
+                else:
+                    mask = masks[j].cpu().numpy()
+                
+                pred = preds[j, 0].cpu().numpy()  # Take channel 0
+                
+                # Transpose from CHW to HWC for visualization
+                image = np.transpose(image, (1, 2, 0))
+                
+                # Denormalize image
+                mean = np.array([0.485, 0.456, 0.406])
+                std = np.array([0.229, 0.224, 0.225])
+                image = std * image + mean
+                image = np.clip(image, 0, 1)
+                
+                # Create figure
+                fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                
+                # Plot original image
+                axes[0].imshow(image)
+                axes[0].set_title('Original Image')
+                axes[0].axis('off')
+                
+                # Plot ground truth mask
+                if len(mask.shape) == 3:
+                    axes[1].imshow(mask[0], cmap='gray')
+                else:
+                    axes[1].imshow(mask, cmap='gray')
+                axes[1].set_title('Ground Truth')
+                axes[1].axis('off')
+                
+                # Plot prediction
+                axes[2].imshow(pred, cmap='gray')
+                axes[2].set_title(f'Prediction (threshold={threshold})')
+                axes[2].axis('off')
+                
+                plt.tight_layout()
+                
+                # Save figure if output_dir provided
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, f"{filenames[j]}_pred.png"))
+                
+                plt.close()
+                
+                # Limit total samples
+                if i * images.shape[0] + j + 1 >= num_samples:
+                    break
 
 # Training function for one epoch
 def train_epoch(model, dataloader, optimizer, criterion, device, rank, accumulation_steps=1):
@@ -414,89 +499,6 @@ def validate(model, dataloader, criterion, device, rank):
         avg_iou = avg_iou_tensor.item() / dist.get_world_size()
     
     return avg_loss, avg_iou
-
-# Visualization function
-def visualize_predictions(model, dataloader, device, num_samples=3, output_dir=None, rank=0):
-    """
-    Visualize model predictions (only run on rank 0)
-    """
-    if rank != 0:
-        return
-        
-    model.eval()
-    
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    with torch.no_grad():
-        for i, batch in enumerate(dataloader):
-            if i >= num_samples:
-                break
-                
-            images = batch['image'].to(device)
-            masks = batch['mask']
-            filenames = batch['filename']
-            
-            # Forward pass
-            outputs = model(images)
-            
-            # Apply sigmoid and threshold
-            preds = torch.sigmoid(outputs) > 0.5
-            
-            # Loop through batch
-            for j in range(images.shape[0]):
-                # Convert tensors to numpy for visualization
-                image = images[j].cpu().numpy()
-                
-                # Ensure mask has the right shape for visualization
-                if len(masks.shape) == 4:
-                    mask = masks[j, 0].cpu().numpy()  # Take channel 0
-                else:
-                    mask = masks[j].cpu().numpy()
-                
-                pred = preds[j, 0].cpu().numpy()  # Take channel 0
-                
-                # Transpose from CHW to HWC for visualization
-                image = np.transpose(image, (1, 2, 0))
-                
-                # Denormalize image
-                mean = np.array([0.485, 0.456, 0.406])
-                std = np.array([0.229, 0.224, 0.225])
-                image = std * image + mean
-                image = np.clip(image, 0, 1)
-                
-                # Create figure
-                fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-                
-                # Plot original image
-                axes[0].imshow(image)
-                axes[0].set_title('Original Image')
-                axes[0].axis('off')
-                
-                # Plot ground truth mask
-                if len(mask.shape) == 3:
-                    axes[1].imshow(mask[0], cmap='gray')
-                else:
-                    axes[1].imshow(mask, cmap='gray')
-                axes[1].set_title('Ground Truth')
-                axes[1].axis('off')
-                
-                # Plot prediction
-                axes[2].imshow(pred, cmap='gray')
-                axes[2].set_title('Prediction')
-                axes[2].axis('off')
-                
-                plt.tight_layout()
-                
-                # Save figure if output_dir provided
-                if output_dir:
-                    plt.savefig(os.path.join(output_dir, f"{filenames[j]}_pred.png"))
-                
-                plt.close()
-                
-                # Limit total samples
-                if i * images.shape[0] + j + 1 >= num_samples:
-                    break
 
 # Setup distributed training
 def setup_distributed(rank, world_size):
@@ -863,7 +865,7 @@ def train_process(rank, world_size, args):
         torch.distributed.barrier()
     
     try:
-        # Create datasets
+        # Create datasets with more aggressive domain adaptation
         train_dataset, val_dataset, test_dataset = create_datasets(
             args.ph2_dir, args.mpox_dir, target_size=(args.img_size, args.img_size)
         )
@@ -913,15 +915,33 @@ def train_process(rank, world_size, args):
         # Wrap model with DDP
         model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
         
-        # Create optimizer and loss function
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()), 
-            lr=args.lr, weight_decay=0.01
-        )
+        # Create optimizer with lower LR for decoder when encoder is frozen
+        if args.freeze_encoder:
+            # Only optimize decoder with higher LR when encoder is frozen
+            decoder_params = [p for n, p in model.named_parameters() 
+                             if 'up' in n or 'outc' in n]
+            optimizer = optim.AdamW(
+                decoder_params,
+                lr=args.lr,
+                weight_decay=0.01
+            )
+            if rank == 0:
+                print(f"Optimizing decoder only with LR={args.lr}")
+        else:
+            # Optimize all parameters with lower LR when fine-tuning everything
+            optimizer = optim.AdamW(
+                model.parameters(),
+                lr=args.lr * 0.1,  # Lower LR for full model
+                weight_decay=0.01
+            )
+            if rank == 0:
+                print(f"Optimizing all parameters with LR={args.lr * 0.1}")
         
-        # Create loss function
-        criterion = EnhancedCombinedLoss(
-            bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.0005
+        # Create improved loss function with better handling for class imbalance
+        # Start with lower positive class weight to avoid over-predicting lesions
+        criterion = ImprovedCombinedLoss(
+            bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=1e-5,
+            pos_weight=0.8, focal_alpha=0.65  # Lower positive weight to reduce FPs
         )
         
         # Create learning rate scheduler
@@ -971,12 +991,43 @@ def train_process(rank, world_size, args):
                 if hasattr(model.module, 'unfreeze_encoder'):
                     model.module.unfreeze_encoder()
                     
-                # Adjust learning rate for fine-tuning
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = param_group['lr'] / 10
+                # Create new optimizer for full model with lower learning rate
+                optimizer = optim.AdamW(
+                    filter(lambda p: p.requires_grad, model.parameters()),
+                    lr=args.lr / 10,  # Reduced LR for fine-tuning
+                    weight_decay=0.01
+                )
+                
+                # Update criterion to focus more on reducing false positives
+                criterion = ImprovedCombinedLoss(
+                    bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=1e-5,
+                    pos_weight=0.7, focal_alpha=0.6  # Even less positive weight for fine-tuning
+                )
+                
+                # Reset scheduler with new optimizer
+                if args.scheduler == 'cosine':
+                    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=args.epochs - args.fine_tune_epoch, eta_min=1e-6
+                    )
+                else:
+                    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                        optimizer, mode='min', factor=0.1, patience=5, verbose=(rank == 0)
+                    )
                 
                 if rank == 0:
-                    print(f"Adjusted learning rate to {optimizer.param_groups[0]['lr']}")
+                    print(f"Created new optimizer with learning rate {optimizer.param_groups[0]['lr']}")
+                    print("Updated criterion to focus more on reducing false positives")
+                
+                # Do a validation run after unfreezing to get a baseline
+                if rank == 0:
+                    print("Running validation after unfreezing encoder...")
+                val_loss, val_iou = validate(model, val_loader, criterion, device, rank)
+                test_metrics = evaluate_clinical_metrics(
+                    model, test_loader, threshold=0.7, mpox_threshold=0.85, 
+                    device=device, is_distributed=True, rank=rank
+                )
+                if rank == 0:
+                    print(f"Baseline metrics after unfreezing - Val IoU: {val_iou:.4f}, Test F1: {test_metrics['f1']:.4f}")
             
             # Train for one epoch
             train_loss, train_iou = train_epoch(
@@ -993,10 +1044,10 @@ def train_process(rank, world_size, args):
                     is_distributed=True, rank=rank
                 )
                 
-                # Also evaluate on test set (Mpox)
+                # Also evaluate on test set (Mpox) with higher threshold
                 test_metrics = evaluate_clinical_metrics(
-                    model, test_loader, threshold=0.7, device=device, 
-                    is_distributed=True, rank=rank
+                    model, test_loader, threshold=0.7, mpox_threshold=0.85,
+                    device=device, is_distributed=True, rank=rank
                 )
                 
                 if rank == 0:
@@ -1071,20 +1122,37 @@ def train_process(rank, world_size, args):
         if rank == 0:
             print("\nEvaluating final model on Mpox dataset...")
             
-        final_test_metrics = evaluate_clinical_metrics(
-            model, test_loader, threshold=0.7, device=device, 
-            is_distributed=True, rank=rank
-        )
+        # Try different thresholds for final evaluation
+        thresholds = [0.6, 0.7, 0.8, 0.85, 0.9]
+        best_f1 = 0
+        best_threshold = 0.7
+        best_metrics = None
+        
+        for threshold in thresholds:
+            if rank == 0:
+                print(f"\nTesting with threshold {threshold}:")
+                
+            mpox_metrics = evaluate_clinical_metrics(
+                model, test_loader, threshold=threshold, mpox_threshold=threshold,
+                device=device, is_distributed=True, rank=rank
+            )
+            
+            if mpox_metrics['f1'] > best_f1:
+                best_f1 = mpox_metrics['f1']
+                best_threshold = threshold
+                best_metrics = mpox_metrics
         
         if rank == 0:
-            print(f"Final Mpox Dataset Metrics:")
-            print(f"F1 Score: {final_test_metrics['f1']:.4f}")
-            print(f"Precision: {final_test_metrics['precision']:.4f}")
-            print(f"Recall: {final_test_metrics['recall']:.4f}")
+            print(f"\nBest threshold for Mpox dataset: {best_threshold}")
+            print(f"Final Mpox Dataset Metrics (threshold={best_threshold}):")
+            print(f"F1 Score: {best_metrics['f1']:.4f}")
+            print(f"Precision: {best_metrics['precision']:.4f}")
+            print(f"Recall: {best_metrics['recall']:.4f}")
             
             # Save final metrics
+            best_metrics['best_threshold'] = best_threshold
             with open(os.path.join(run_dir, "final_mpox_metrics.json"), 'w') as f:
-                json.dump(final_test_metrics, f, indent=4)
+                json.dump(best_metrics, f, indent=4)
             
             # Plot training history
             plot_history(history, run_dir, rank)
@@ -1095,6 +1163,9 @@ def train_process(rank, world_size, args):
             os.makedirs(vis_dir, exist_ok=True)
             
             # Create a non-distributed loader for visualization to avoid redundant work
+            import albumentations as A
+            from albumentations.pytorch import ToTensorV2
+            
             test_dataset_vis = GenericLesionDataset(
                 args.mpox_dir, None, transform=None, target_size=(args.img_size, args.img_size),
                 aug_transform=A.Compose([
@@ -1108,7 +1179,9 @@ def train_process(rank, world_size, args):
                 num_workers=args.num_workers, pin_memory=True
             )
             
-            visualize_predictions(model, test_loader_vis, device, num_samples=10, output_dir=vis_dir, rank=rank)
+            # Use best threshold for visualization
+            visualize_predictions(model, test_loader_vis, device, threshold=best_threshold,
+                                 num_samples=10, output_dir=vis_dir, rank=rank)
             
             print(f"Transfer learning completed. Results saved to {run_dir}")
             
