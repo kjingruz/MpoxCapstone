@@ -79,13 +79,11 @@ echo "Batch size: ${BATCH_SIZE}"
 echo "Output directory: ${FINETUNE_OUTPUT_DIR}"
 echo "=========================================================="
 
-ln -s /home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml /home/zhangk/Mpox/MedSAM2/sam2/sam2.1_hiera_b+.yaml
-
 python ${SCRIPTS_DIR}/finetune_medsam2_mpox.py \
     --data_dir ${NPY_DIR} \
     --output_dir ${FINETUNE_OUTPUT_DIR} \
     --sam2_checkpoint ${SAM2_CHECKPOINT} \
-    --model_cfg "sam2.1_hiera_b+.yaml" \
+    --model_cfg "sam2_hiera_b+.yaml" \
     --batch_size ${BATCH_SIZE} \
     --num_epochs 30 \
     --learning_rate 1e-5 \
