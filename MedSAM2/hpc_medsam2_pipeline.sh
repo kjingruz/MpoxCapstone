@@ -12,7 +12,7 @@
 ###############################################################################
 # MedSAM2 Complete Pipeline Script for HPC
 # This script runs the entire MedSAM2 pipeline for Mpox lesion segmentation:
-# 1. Environment setup
+# 1. Environment setup (using venv)
 # 2. Data preparation
 # 3. Inference with pretrained model
 # 4. Fine-tuning (if masks available)
@@ -37,7 +37,7 @@ export MPOX_DATA_DIR=${BASE_DIR}/mpox_data
 export SCRIPTS_DIR=${BASE_DIR}/scripts
 export RESULTS_DIR=${BASE_DIR}/results
 export FINETUNE_DIR=${BASE_DIR}/finetune
-export ENV_NAME=sam2_in_med
+export ENV_PATH=${BASE_DIR}/medsam2_env
 
 # 3) Parse command line arguments
 DO_SETUP=1
@@ -108,21 +108,19 @@ if [ ! -f "${BASE_DIR}/activate_env.sh" ]; then
     mkdir -p ${BASE_DIR}
     cat > ${BASE_DIR}/activate_env.sh << EOF
 #!/bin/bash
-# Helper script to activate MedSAM2 environment
+# Helper script to activate MedSAM2 environment with venv
 
-# Load modules
+# Load modules (keep any modules you need from your HPC)
 module purge
 module load python/3.10
-module load anaconda3
-module load cuda/12.1
-module load cudnn/8.9.5-cuda12
+module load cuda/12.1  # Adjust as needed for your HPC
+module load cudnn/8.9.5-cuda12  # Adjust as needed
 
-# Activate conda environment
-source \$(conda info --base)/etc/profile.d/conda.sh
-conda activate ${ENV_NAME}
+# Activate venv environment
+source ${ENV_PATH}/bin/activate
 
 # Set CUDA_HOME
-export CUDA_HOME=/usr/local/cuda-12.1
+export CUDA_HOME=/usr/local/cuda-12.1  # Adjust as needed
 
 # Print environment info
 echo "MedSAM2 environment activated."
@@ -173,8 +171,146 @@ if [ ${DO_SETUP} -eq 1 ]; then
     echo "STEP 1: Setting up MedSAM2 environment"
     echo "=========================================================="
     
-    # Copy the setup script to scripts directory
-    cp hpc_medsam2_setup.sh ${SCRIPTS_DIR}/
+    # Create the setup script
+    cat > ${SCRIPTS_DIR}/hpc_medsam2_setup.sh << 'EOF'
+#!/bin/bash
+#SBATCH --job-name=MedSAM2_Setup
+#SBATCH --output=MedSAM2_Setup_%j.log
+#SBATCH --error=MedSAM2_Setup_%j.log
+#SBATCH --time=2:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --partition=main
+
+###############################################################################
+# MedSAM2 Environment Setup Script for HPC (using venv)
+###############################################################################
+
+# 1) Print start time and node info
+echo "=========================================================="
+echo "Starting MedSAM2 Environment Setup on HPC (using venv)"
+echo "Current time: $(date)"
+echo "Running on node: $(hostname)"
+echo "Current directory: $(pwd)"
+echo "=========================================================="
+
+# 2) Define directories and settings
+BASE_DIR=${SCRATCH:-$HOME}/MedSAM2_Mpox
+ENV_PATH=${BASE_DIR}/medsam2_env
+MEDSAM_DIR=${BASE_DIR}/MedSAM2
+CHECKPOINT_DIR=${BASE_DIR}/checkpoints
+MPOX_DATA_DIR=${BASE_DIR}/mpox_data
+
+mkdir -p ${BASE_DIR}
+mkdir -p ${CHECKPOINT_DIR}
+
+# 3) Load modules
+echo "Loading required modules..."
+module purge
+module load python/3.10
+module load cuda/12.1  # Adjust as needed for your HPC
+module load cudnn/8.9.5-cuda12  # Adjust as needed
+
+# 4) Create and activate Python venv environment
+echo "Creating Python venv environment at ${ENV_PATH}..."
+python3 -m venv ${ENV_PATH}
+
+# Activate the venv
+source ${ENV_PATH}/bin/activate
+
+# Check if environment was successfully activated
+if [[ $? -ne 0 ]]; then
+    echo "ERROR: Failed to activate venv environment."
+    exit 1
+fi
+
+# 5) Install PyTorch and dependencies
+echo "Installing PyTorch 2.3.1 with CUDA support..."
+pip install --upgrade pip
+pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+
+echo "Installing additional dependencies..."
+pip install matplotlib scipy scikit-image opencv-python tqdm nibabel gradio==3.38.0 tensorboard
+
+# 6) Clone MedSAM2 repository
+echo "Cloning MedSAM2 repository..."
+cd ${BASE_DIR}
+if [ -d "${MEDSAM_DIR}" ]; then
+    echo "MedSAM2 repository already exists. Updating..."
+    cd ${MEDSAM_DIR}
+    git checkout MedSAM2
+    git pull
+else
+    git clone -b MedSAM2 https://github.com/bowang-lab/MedSAM/ ${MEDSAM_DIR}
+    cd ${MEDSAM_DIR}
+fi
+
+# 7) Set CUDA_HOME environment variable
+export CUDA_HOME=/usr/local/cuda-12.1  # Adjust for your HPC
+echo "Setting CUDA_HOME=${CUDA_HOME}"
+
+# 8) Install MedSAM2 package in development mode
+echo "Installing MedSAM2 package..."
+pip install -e .
+
+# 9) Download SAM2 checkpoints
+echo "Downloading SAM2 checkpoints..."
+cd ${CHECKPOINT_DIR}
+
+BASE_URL="https://dl.fbaipublicfiles.com/segment_anything_2/072824/"
+checkpoints=(
+    "sam2_hiera_tiny.pt" 
+    "sam2_hiera_small.pt" 
+    "sam2_hiera_base_plus.pt"
+)
+
+# Download only base_plus checkpoint by default to save time
+# (uncomment others if needed)
+for ckpt in "${checkpoints[@]}"; do
+    if [[ $ckpt == "sam2_hiera_base_plus.pt" ]]; then
+        if [ ! -f "${CHECKPOINT_DIR}/${ckpt}" ]; then
+            echo "Downloading ${ckpt}..."
+            wget ${BASE_URL}${ckpt}
+        else
+            echo "${ckpt} already exists."
+        fi
+    fi
+done
+
+# 10) Download MedSAM2 pretrained weights
+echo "Downloading MedSAM2 pretrained weights..."
+if [ ! -f "${CHECKPOINT_DIR}/MedSAM2_pretrain.pth" ]; then
+    wget -O ${CHECKPOINT_DIR}/MedSAM2_pretrain.pth \
+        https://huggingface.co/jiayuanz3/MedSAM2_pretrain/resolve/main/MedSAM2_pretrain.pth
+else
+    echo "MedSAM2 pretrained weights already exist."
+fi
+
+# 11) Create directory structure for Mpox data
+echo "Creating directory structure for Mpox data..."
+mkdir -p ${MPOX_DATA_DIR}/{images,masks,npz_inference,npz_train,npz_val,npy}
+
+# 12) Print summary and instructions
+echo "=========================================================="
+echo "MedSAM2 ENVIRONMENT SETUP COMPLETE (using venv)"
+echo "=========================================================="
+echo "Base directory: ${BASE_DIR}"
+echo "MedSAM2 code: ${MEDSAM_DIR}"
+echo "Checkpoints: ${CHECKPOINT_DIR}"
+echo "Mpox data: ${MPOX_DATA_DIR}"
+echo ""
+echo "To activate the environment in future scripts, source the activation script:"
+echo "source ${BASE_DIR}/activate_env.sh"
+echo ""
+echo "Next steps:"
+echo "1. Upload your Mpox images to ${MPOX_DATA_DIR}/images"
+echo "2. If available, upload your Mpox masks to ${MPOX_DATA_DIR}/masks"
+echo "3. Run the data preparation script: sbatch hpc_medsam2_dataprep.sh"
+echo "4. Run inference: sbatch hpc_medsam2_inference.sh"
+echo "5. (Optional) Fine-tune the model: sbatch hpc_medsam2_finetune.sh"
+echo "=========================================================="
+EOF
     chmod +x ${SCRIPTS_DIR}/hpc_medsam2_setup.sh
     
     # Run setup script and save log
