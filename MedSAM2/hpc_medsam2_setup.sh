@@ -21,14 +21,16 @@ echo "Current directory: $(pwd)"
 echo "=========================================================="
 
 # 2) Define directories and settings
-BASE_DIR=${SCRATCH:-$HOME}/MedSAM2_Mpox
+BASE_DIR=${HOME}/Mpox
 ENV_NAME=sam2_in_med
 MEDSAM_DIR=${BASE_DIR}/MedSAM2
 CHECKPOINT_DIR=${BASE_DIR}/checkpoints
-MPOX_DATA_DIR=${BASE_DIR}/mpox_data
+MPOX_DATA_DIR=${BASE_DIR}/data
+SCRIPTS_DIR=${BASE_DIR}/scripts
 
 mkdir -p ${BASE_DIR}
 mkdir -p ${CHECKPOINT_DIR}
+mkdir -p ${SCRIPTS_DIR}
 
 # 3) Load modules
 echo "Loading required modules..."
@@ -57,18 +59,18 @@ echo "Installing PyTorch 2.3.1 with CUDA support..."
 pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
 
 echo "Installing additional dependencies..."
-pip install matplotlib scipy scikit-image opencv-python tqdm nibabel gradio==3.38.0 tensorboard
+pip install matplotlib scipy scikit-image opencv-python tqdm nibabel pycocotools
+pip install pandas seaborn tensorboard
 
-# 6) Clone MedSAM2 repository
-echo "Cloning MedSAM2 repository..."
+# 6) Clone SAM2 repository 
+echo "Cloning SAM2 repository..."
 cd ${BASE_DIR}
 if [ -d "${MEDSAM_DIR}" ]; then
-    echo "MedSAM2 repository already exists. Updating..."
+    echo "SAM2 repository already exists. Updating..."
     cd ${MEDSAM_DIR}
-    git checkout MedSAM2
     git pull
 else
-    git clone -b MedSAM2 https://github.com/bowang-lab/MedSAM/ ${MEDSAM_DIR}
+    git clone https://github.com/facebookresearch/sam2.git ${MEDSAM_DIR}
     cd ${MEDSAM_DIR}
 fi
 
@@ -76,25 +78,24 @@ fi
 export CUDA_HOME=/usr/local/cuda-12.1
 echo "Setting CUDA_HOME=${CUDA_HOME}"
 
-# 8) Install MedSAM2 package in development mode
-echo "Installing MedSAM2 package..."
+# 8) Install SAM2 package in development mode
+echo "Installing SAM2 package..."
 pip install -e .
 
 # 9) Download SAM2 checkpoints
 echo "Downloading SAM2 checkpoints..."
 cd ${CHECKPOINT_DIR}
 
-BASE_URL="https://dl.fbaipublicfiles.com/segment_anything_2/072824/"
+# Using the latest SAM 2.1 models
+BASE_URL="https://dl.fbaipublicfiles.com/segment_anything_2/092824/"
 checkpoints=(
-    "sam2_hiera_tiny.pt" 
-    "sam2_hiera_small.pt" 
-    "sam2_hiera_base_plus.pt"
+    "sam2.1_hiera_tiny.pt" 
+    "sam2.1_hiera_base_plus.pt"
 )
 
-# Download only base_plus checkpoint by default to save time
-# (uncomment others if needed)
+# Download only base_plus checkpoint by default since we have sufficient resources
 for ckpt in "${checkpoints[@]}"; do
-    if [[ $ckpt == "sam2_hiera_base_plus.pt" ]]; then
+    if [[ $ckpt == "sam2.1_hiera_base_plus.pt" ]]; then
         if [ ! -f "${CHECKPOINT_DIR}/${ckpt}" ]; then
             echo "Downloading ${ckpt}..."
             wget ${BASE_URL}${ckpt}
@@ -104,46 +105,18 @@ for ckpt in "${checkpoints[@]}"; do
     fi
 done
 
-# 10) Download MedSAM2 pretrained weights
-echo "Downloading MedSAM2 pretrained weights..."
-if [ ! -f "${CHECKPOINT_DIR}/MedSAM2_pretrain.pth" ]; then
-    wget -O ${CHECKPOINT_DIR}/MedSAM2_pretrain.pth \
-        https://huggingface.co/jiayuanz3/MedSAM2_pretrain/resolve/main/MedSAM2_pretrain.pth
-else
-    echo "MedSAM2 pretrained weights already exist."
-fi
+# 10) Copy Python scripts to scripts directory
+echo "Copying Python scripts..."
+cp ${BASE_DIR}/coco_to_masks.py ${SCRIPTS_DIR}/
+cp ${BASE_DIR}/mpox_data_prep.py ${SCRIPTS_DIR}/
+cp ${BASE_DIR}/finetune_medsam2_mpox.py ${SCRIPTS_DIR}/
+cp ${BASE_DIR}/run_medsam2_inference.py ${SCRIPTS_DIR}/
+cp ${BASE_DIR}/evaluate_medsam2.py ${SCRIPTS_DIR}/
 
-# 11) Create directory structure for Mpox data
-echo "Creating directory structure for Mpox data..."
-mkdir -p ${MPOX_DATA_DIR}/{images,masks,npz_inference,npz_train,npz_val,npy}
+# Make scripts executable
+chmod +x ${SCRIPTS_DIR}/*.py
 
-# 12) Create helper utility for copying scripts
-cat > ${BASE_DIR}/utils.sh << 'EOF'
-#!/bin/bash
-# Helper functions for MedSAM2 scripts
-
-function copy_scripts() {
-    source_dir="$1"
-    target_dir="$2"
-    
-    mkdir -p "$target_dir"
-    
-    # Copy Python scripts
-    if [ -d "$source_dir" ]; then
-        cp "$source_dir"/*.py "$target_dir"/ 2>/dev/null || true
-        cp "$source_dir"/*.sh "$target_dir"/ 2>/dev/null || true
-        echo "Copied scripts from $source_dir to $target_dir"
-    else
-        echo "Source directory $source_dir does not exist"
-    fi
-    
-    # Make shell scripts executable
-    chmod +x "$target_dir"/*.sh 2>/dev/null || true
-}
-EOF
-chmod +x ${BASE_DIR}/utils.sh
-
-# 13) Create a helper script to activate the environment
+# 11) Create a helper script to activate the environment
 cat > ${BASE_DIR}/activate_env.sh << EOF
 #!/bin/bash
 # Helper script to activate MedSAM2 environment
@@ -176,12 +149,12 @@ export MEDSAM2_DATA="${MPOX_DATA_DIR}"
 EOF
 chmod +x ${BASE_DIR}/activate_env.sh
 
-# 14) Print summary and instructions
+# 12) Print summary and instructions
 echo "=========================================================="
 echo "MedSAM2 ENVIRONMENT SETUP COMPLETE"
 echo "=========================================================="
 echo "Base directory: ${BASE_DIR}"
-echo "MedSAM2 code: ${MEDSAM_DIR}"
+echo "SAM2 code: ${MEDSAM_DIR}"
 echo "Checkpoints: ${CHECKPOINT_DIR}"
 echo "Mpox data: ${MPOX_DATA_DIR}"
 echo ""
@@ -189,9 +162,8 @@ echo "To activate the environment in future scripts, source the activation scrip
 echo "source ${BASE_DIR}/activate_env.sh"
 echo ""
 echo "Next steps:"
-echo "1. Upload your Mpox images to ${MPOX_DATA_DIR}/images"
-echo "2. If available, upload your Mpox masks to ${MPOX_DATA_DIR}/masks"
-echo "3. Run the data preparation script: sbatch hpc_medsam2_dataprep.sh"
+echo "1. Convert COCO annotations to masks: sbatch hpc_medsam2_coco_to_mask.sh"
+echo "2. Run the data preparation script: sbatch hpc_medsam2_dataprep.sh"
+echo "3. Run fine-tuning: sbatch hpc_medsam2_finetune.sh"
 echo "4. Run inference: sbatch hpc_medsam2_inference.sh"
-echo "5. (Optional) Fine-tune the model: sbatch hpc_medsam2_finetune.sh"
 echo "=========================================================="
