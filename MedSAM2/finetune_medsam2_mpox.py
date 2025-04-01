@@ -402,10 +402,16 @@ def main():
     
     # Create visualization of training samples
     vis_dir = ensure_dir(os.path.join(model_save_path, "data_samples"))
-    inv_transform = dataset.transform.inverse
+    
+    # Skip the inverse transform - just normalize the image for display
+    def simple_normalize(img_tensor):
+        # Simple normalization for visualization
+        img = img_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        img = (img - img.min()) / (img.max() - img.min() + 1e-8)  # Normalize to [0,1]
+        return img
     
     for i, sample in enumerate(samples):
-        image = inv_transform(sample['image'].squeeze(0)).permute(1, 2, 0).numpy()
+        image = simple_normalize(sample['image'])
         mask = sample['mask'].squeeze().numpy()
         bbox = sample['bbox'].squeeze().numpy()
         name = sample['name']
