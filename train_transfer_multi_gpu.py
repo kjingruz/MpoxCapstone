@@ -57,7 +57,7 @@ class DiceLoss(nn.Module):
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.75, gamma=2.0):
         super(FocalLoss, self).__init__()
-        self.alpha = alpha
+        self.alpha = alpha  # Keep as float
         self.gamma = gamma
         self.eps = 1e-6
         
@@ -77,7 +77,8 @@ class FocalLoss(nn.Module):
         pt = targets * probs + (1 - targets) * (1 - probs)
         focal_weights = (1 - pt).pow(self.gamma)
         
-        # Create alpha tensor on the same device as inputs
+        # Create alpha tensor directly on the device
+        # Instead of trying to move self.alpha to the device
         alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
         
         # Apply weights to BCE loss with clipping for stability
@@ -140,6 +141,7 @@ class EnhancedCombinedLoss(nn.Module):
                 self.reg_weight * reg_loss)
         
 # Improved combined loss with proper regularization and device handling
+# Improved combined loss with proper regularization and device handling
 class ImprovedCombinedLoss(nn.Module):
     def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=1e-5, 
                 pos_weight=None, focal_alpha=0.65):
@@ -156,7 +158,9 @@ class ImprovedCombinedLoss(nn.Module):
         # Initialize without pos_weight
         self.bce = nn.BCEWithLogitsLoss()
         self.dice = DiceLoss(smooth=1e-6)
-        self.focal = None  # Will initialize in forward pass to match device
+        
+        # Create focal loss with alpha as float (don't try to convert to tensor)
+        self.focal = FocalLoss(alpha=self.focal_alpha, gamma=2.0)
         
     def forward(self, logits, targets, model=None):
         # Ensure targets has the same shape as logits
@@ -168,13 +172,6 @@ class ImprovedCombinedLoss(nn.Module):
         
         # Get device from inputs to ensure everything is on the same device
         device = logits.device
-        
-        # Create loss functions on the right device if needed
-        if self.focal is None or self.focal.alpha.device != device:
-            self.focal = FocalLoss(alpha=self.focal_alpha, gamma=2.0)
-            # Move focal loss parameters to the right device
-            if hasattr(self.focal, 'alpha'):
-                self.focal.alpha = self.focal.alpha.to(device)
         
         # Create BCEWithLogitsLoss with pos_weight on the right device
         if self.pos_weight_value is not None:
