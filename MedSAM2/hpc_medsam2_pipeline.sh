@@ -142,7 +142,7 @@ if [ ${DO_COCO} -eq 1 ]; then
     fi
     
     # Run COCO to mask conversion
-    python ${SCRIPTS_DIR}/coco_to_masks.py \
+    python ${SCRIPTS_DIR}/coco_to_masks_simple.py \
         --coco_json ${COCO_FILE} \
         --img_dir ${MPOX_DIR} \
         --output_dir ${MPOX_DIR}/masks \
