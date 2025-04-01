@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import argparse
 import json
+import cv2
 
 # Import our models and dataset handling
 from unet_model import UNet
@@ -99,8 +100,7 @@ class EnhancedCombinedLoss(nn.Module):
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         self.reg_weight = reg_weight
-        pos_weight = torch.ones_like(targets) * 0.2  # Strongly reduce weight for positive predictions
-        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.bce = nn.BCEWithLogitsLoss()
         self.dice = DiceLoss()
         self.focal = FocalLoss(alpha=0.25, gamma=2.0)  # Decrease alpha to reduce false positives
         
@@ -112,6 +112,9 @@ class EnhancedCombinedLoss(nn.Module):
         # Ensure float type
         targets = targets.float()
         device = logits.device
+
+        pos_weight = torch.ones_like(targets) * 0.2  # Strongly reduce weight for positive predictions
+        bce_with_weight = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         
         # Calculate individual losses
         bce_loss = self.bce(logits, targets)
@@ -1042,6 +1045,7 @@ def train_process(rank, world_size, args):
         # Early stopping variables
         best_val_iou = 0
         best_f1_score = 0
+        best_precision = 0
         patience_counter = 0
         
         # Start training
@@ -1133,29 +1137,6 @@ def train_process(rank, world_size, args):
                 val_metrics = None
                 test_metrics = None
 
-            # Also evaluate on filtered Mpox dataset (with fewer lesions)
-            filtered_test_loader = create_filtered_test_loader(
-                args.mpox_dir, max_lesions=10, batch_size=args.batch_size,
-                target_size=(args.img_size, args.img_size), num_workers=args.num_workers
-            )
-            
-            filtered_metrics = evaluate_clinical_metrics(
-                model, filtered_test_loader, threshold=best_threshold,
-                device=device, is_distributed=True, rank=rank
-            )
-            
-            if rank == 0:
-                print("\nFiltered Mpox Dataset Metrics (fewer than 10 lesions):")
-                print(f"F1 Score: {filtered_metrics['f1']:.4f}")
-                print(f"Precision: {filtered_metrics['precision']:.4f}")
-                print(f"Recall: {filtered_metrics['recall']:.4f}")
-                
-                # Save visualizations for filtered dataset
-                vis_dir_filtered = os.path.join(run_dir, "mpox_visualizations_filtered")
-                os.makedirs(vis_dir_filtered, exist_ok=True)
-                visualize_predictions(model, filtered_test_loader, device, threshold=best_threshold,
-                                     num_samples=10, output_dir=vis_dir_filtered, rank=rank)
-            
             # Update learning rate
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(val_loss)
@@ -1251,6 +1232,29 @@ def train_process(rank, world_size, args):
             print("Generating prediction visualizations on Mpox dataset...")
             vis_dir = os.path.join(run_dir, "mpox_visualizations")
             os.makedirs(vis_dir, exist_ok=True)
+
+            # Also evaluate on filtered Mpox dataset (with fewer lesions)
+            filtered_test_loader = create_filtered_test_loader(
+                args.mpox_dir, max_lesions=10, batch_size=args.batch_size,
+                target_size=(args.img_size, args.img_size), num_workers=args.num_workers
+            )
+            
+            filtered_metrics = evaluate_clinical_metrics(
+                model, filtered_test_loader, threshold=best_threshold,
+                device=device, is_distributed=True, rank=rank
+            )
+            
+            if rank == 0:
+                print("\nFiltered Mpox Dataset Metrics (fewer than 10 lesions):")
+                print(f"F1 Score: {filtered_metrics['f1']:.4f}")
+                print(f"Precision: {filtered_metrics['precision']:.4f}")
+                print(f"Recall: {filtered_metrics['recall']:.4f}")
+                
+                # Save visualizations for filtered dataset
+                vis_dir_filtered = os.path.join(run_dir, "mpox_visualizations_filtered")
+                os.makedirs(vis_dir_filtered, exist_ok=True)
+                visualize_predictions(model, filtered_test_loader, device, threshold=best_threshold,
+                                     num_samples=10, output_dir=vis_dir_filtered, rank=rank)
             
             # Create a non-distributed loader for visualization to avoid redundant work
             import albumentations as A
@@ -1304,7 +1308,7 @@ def count_lesions_in_mask(mask, min_size=10):
     return num_valid_lesions
 
 # Modify the test dataset creation to filter by lesion count
-def create_filtered_test_loader(mpox_dir, max_lesions=10, batch_size=16, target_size=(256, 256), num_workers=4):
+def create_filtered_test_loader(mpox_dir, max_lesions=10, batch_size=16, target_size=(256, 256), num_workers=4, rank=0):
     """Create a test loader with only images having fewer than max_lesions lesions"""
     import albumentations as A
     from albumentations.pytorch import ToTensorV2
