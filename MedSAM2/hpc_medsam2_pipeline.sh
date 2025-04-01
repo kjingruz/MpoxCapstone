@@ -2,7 +2,7 @@
 #SBATCH --job-name=MedSAM2_Pipeline
 #SBATCH --output=MedSAM2_Pipeline_%j.log
 #SBATCH --error=MedSAM2_Pipeline_%j.log
-#SBATCH --time=48:00:00
+#SBATCH --time=36:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=700G
@@ -11,12 +11,13 @@
 
 ###############################################################################
 # MedSAM2 Complete Pipeline Script for HPC
-# This script runs the entire MedSAM2 pipeline for Mpox lesion segmentation:
-# 1. Environment setup (using venv)
-# 2. Data preparation
-# 3. Inference with pretrained model
-# 4. Fine-tuning (if masks available)
-# 5. Inference with fine-tuned model
+# This script runs the entire MedSAM2 workflow for Mpox lesion segmentation:
+# 1. Environment setup
+# 2. COCO to mask conversion
+# 3. Data preparation
+# 4. Fine-tuning
+# 5. Inference
+# 6. Evaluation
 ###############################################################################
 
 # 1) Print start time and node info
@@ -30,22 +31,23 @@ echo "Current directory: $(pwd)"
 echo "=========================================================="
 
 # 2) Define directories and settings
-export BASE_DIR=${SCRATCH:-$HOME}/MedSAM2_Mpox
-export MEDSAM_DIR=${BASE_DIR}/MedSAM2
-export CHECKPOINT_DIR=${BASE_DIR}/checkpoints
-export MPOX_DATA_DIR=${BASE_DIR}/mpox_data
-export SCRIPTS_DIR=${BASE_DIR}/scripts
-export RESULTS_DIR=${BASE_DIR}/results
-export FINETUNE_DIR=${BASE_DIR}/finetune
-export ENV_PATH=${BASE_DIR}/medsam2_env
+BASE_DIR=${HOME}/Mpox
+MPOX_DIR=${BASE_DIR}/data/Monkey_Pox
+COCO_FILE=${MPOX_DIR}/annotation/instances_default.json
+SCRIPTS_DIR=${BASE_DIR}/scripts
+CHECKPOINT_DIR=${BASE_DIR}/checkpoints
+MPOX_DATA_DIR=${BASE_DIR}/mpox_data
+FINETUNE_DIR=${BASE_DIR}/finetune
+RESULTS_DIR=${BASE_DIR}/results
+EVALUATION_DIR=${BASE_DIR}/evaluation
 
 # 3) Parse command line arguments
 DO_SETUP=1
+DO_COCO=1
 DO_DATAPREP=1
-DO_INFERENCE=1
 DO_FINETUNE=1
-IMAGE_DIR=""
-MASK_DIR=""
+DO_INFERENCE=1
+DO_EVALUATE=1
 RUN_NAME=$(date +"%Y%m%d_%H%M%S")
 
 # Parse command line arguments
@@ -56,26 +58,24 @@ while [[ $# -gt 0 ]]; do
         DO_SETUP=0
         shift
         ;;
-        --skip-dataprep)
-        DO_DATAPREP=0
+        --skip-coco)
+        DO_COCO=0
         shift
         ;;
-        --skip-inference)
-        DO_INFERENCE=0
+        --skip-dataprep)
+        DO_DATAPREP=0
         shift
         ;;
         --skip-finetune)
         DO_FINETUNE=0
         shift
         ;;
-        --image-dir)
-        IMAGE_DIR="$2"
-        shift
+        --skip-inference)
+        DO_INFERENCE=0
         shift
         ;;
-        --mask-dir)
-        MASK_DIR="$2"
-        shift
+        --skip-evaluate)
+        DO_EVALUATE=0
         shift
         ;;
         --run-name)
@@ -93,7 +93,6 @@ done
 # Create run directory with timestamp
 RUN_DIR=${BASE_DIR}/runs/${RUN_NAME}
 mkdir -p ${RUN_DIR}
-mkdir -p ${SCRIPTS_DIR}
 
 # Create log directory
 LOG_DIR=${RUN_DIR}/logs
@@ -103,370 +102,302 @@ mkdir -p ${LOG_DIR}
 MASTER_LOG=${LOG_DIR}/master_log.txt
 exec > >(tee -a "${MASTER_LOG}") 2>&1
 
-# 4) Create environment activation script if it doesn't exist
-if [ ! -f "${BASE_DIR}/activate_env.sh" ]; then
-    mkdir -p ${BASE_DIR}
-    cat > ${BASE_DIR}/activate_env.sh << EOF
-#!/bin/bash
-# Helper script to activate MedSAM2 environment with venv
-
-# Load modules (keep any modules you need from your HPC)
-module purge
-module load python/3.10
-module load cuda/12.1  # Adjust as needed for your HPC
-module load cudnn/8.9.5-cuda12  # Adjust as needed
-
-# Activate venv environment
-source ${ENV_PATH}/bin/activate
-
-# Set CUDA_HOME
-export CUDA_HOME=/usr/local/cuda-12.1  # Adjust as needed
-
-# Print environment info
-echo "MedSAM2 environment activated."
-echo "Python: \$(which python)"
-echo "PyTorch: \$(python -c 'import torch; print(torch.__version__)')"
-echo "CUDA available: \$(python -c 'import torch; print(torch.cuda.is_available())')"
-echo "Using CUDA_HOME=\${CUDA_HOME}"
-
-# Set MedSAM2 base directory
-export MEDSAM2_BASE="${BASE_DIR}"
-export MEDSAM2_CHECKPOINTS="${CHECKPOINT_DIR}"
-export MEDSAM2_DATA="${MPOX_DATA_DIR}"
-EOF
-    chmod +x ${BASE_DIR}/activate_env.sh
-fi
-
-# 5) Create utility functions script if it doesn't exist
-if [ ! -f "${BASE_DIR}/utils.sh" ]; then
-    cat > ${BASE_DIR}/utils.sh << 'EOF'
-#!/bin/bash
-# Helper functions for MedSAM2 scripts
-
-function copy_scripts() {
-    source_dir="$1"
-    target_dir="$2"
-    
-    mkdir -p "$target_dir"
-    
-    # Copy Python scripts
-    if [ -d "$source_dir" ]; then
-        cp "$source_dir"/*.py "$target_dir"/ 2>/dev/null || true
-        cp "$source_dir"/*.sh "$target_dir"/ 2>/dev/null || true
-        echo "Copied scripts from $source_dir to $target_dir"
-    else
-        echo "Source directory $source_dir does not exist"
-    fi
-    
-    # Make shell scripts executable
-    chmod +x "$target_dir"/*.sh 2>/dev/null || true
-}
-EOF
-    chmod +x ${BASE_DIR}/utils.sh
-fi
-
-# 6) Environment setup
+# 4) Environment setup
 if [ ${DO_SETUP} -eq 1 ]; then
     echo "=========================================================="
     echo "STEP 1: Setting up MedSAM2 environment"
     echo "=========================================================="
     
-    # Create the setup script
-    cat > ${SCRIPTS_DIR}/hpc_medsam2_setup.sh << 'EOF'
-#!/bin/bash
-#SBATCH --job-name=MedSAM2_Setup
-#SBATCH --output=MedSAM2_Setup_%j.log
-#SBATCH --error=MedSAM2_Setup_%j.log
-#SBATCH --time=2:00:00
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --partition=main
-
-###############################################################################
-# MedSAM2 Environment Setup Script for HPC (using venv)
-###############################################################################
-
-# 1) Print start time and node info
-echo "=========================================================="
-echo "Starting MedSAM2 Environment Setup on HPC (using venv)"
-echo "Current time: $(date)"
-echo "Running on node: $(hostname)"
-echo "Current directory: $(pwd)"
-echo "=========================================================="
-
-# 2) Define directories and settings
-BASE_DIR=${SCRATCH:-$HOME}/MedSAM2_Mpox
-ENV_PATH=${BASE_DIR}/medsam2_env
-MEDSAM_DIR=${BASE_DIR}/MedSAM2
-CHECKPOINT_DIR=${BASE_DIR}/checkpoints
-MPOX_DATA_DIR=${BASE_DIR}/mpox_data
-
-mkdir -p ${BASE_DIR}
-mkdir -p ${CHECKPOINT_DIR}
-
-# 3) Load modules
-echo "Loading required modules..."
-module purge
-module load python/3.10
-module load cuda/12.1  # Adjust as needed for your HPC
-module load cudnn/8.9.5-cuda12  # Adjust as needed
-
-# 4) Create and activate Python venv environment
-echo "Creating Python venv environment at ${ENV_PATH}..."
-python3 -m venv ${ENV_PATH}
-
-# Activate the venv
-source ${ENV_PATH}/bin/activate
-
-# Check if environment was successfully activated
-if [[ $? -ne 0 ]]; then
-    echo "ERROR: Failed to activate venv environment."
-    exit 1
-fi
-
-# 5) Install PyTorch and dependencies
-echo "Installing PyTorch 2.3.1 with CUDA support..."
-pip install --upgrade pip
-pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
-
-echo "Installing additional dependencies..."
-pip install matplotlib scipy scikit-image opencv-python tqdm nibabel gradio==3.38.0 tensorboard
-
-# 6) Clone MedSAM2 repository
-echo "Cloning MedSAM2 repository..."
-cd ${BASE_DIR}
-if [ -d "${MEDSAM_DIR}" ]; then
-    echo "MedSAM2 repository already exists. Updating..."
-    cd ${MEDSAM_DIR}
-    git checkout MedSAM2
-    git pull
-else
-    git clone -b MedSAM2 https://github.com/bowang-lab/MedSAM/ ${MEDSAM_DIR}
-    cd ${MEDSAM_DIR}
-fi
-
-# 7) Set CUDA_HOME environment variable
-export CUDA_HOME=/usr/local/cuda-12.1  # Adjust for your HPC
-echo "Setting CUDA_HOME=${CUDA_HOME}"
-
-# 8) Install MedSAM2 package in development mode
-echo "Installing MedSAM2 package..."
-pip install -e .
-
-# 9) Download SAM2 checkpoints
-echo "Downloading SAM2 checkpoints..."
-cd ${CHECKPOINT_DIR}
-
-BASE_URL="https://dl.fbaipublicfiles.com/segment_anything_2/072824/"
-checkpoints=(
-    "sam2_hiera_tiny.pt" 
-    "sam2_hiera_small.pt" 
-    "sam2_hiera_base_plus.pt"
-)
-
-# Download only base_plus checkpoint by default to save time
-# (uncomment others if needed)
-for ckpt in "${checkpoints[@]}"; do
-    if [[ $ckpt == "sam2_hiera_base_plus.pt" ]]; then
-        if [ ! -f "${CHECKPOINT_DIR}/${ckpt}" ]; then
-            echo "Downloading ${ckpt}..."
-            wget ${BASE_URL}${ckpt}
-        else
-            echo "${ckpt} already exists."
-        fi
-    fi
-done
-
-# 10) Download MedSAM2 pretrained weights
-echo "Downloading MedSAM2 pretrained weights..."
-if [ ! -f "${CHECKPOINT_DIR}/MedSAM2_pretrain.pth" ]; then
-    wget -O ${CHECKPOINT_DIR}/MedSAM2_pretrain.pth \
-        https://huggingface.co/jiayuanz3/MedSAM2_pretrain/resolve/main/MedSAM2_pretrain.pth
-else
-    echo "MedSAM2 pretrained weights already exist."
-fi
-
-# 11) Create directory structure for Mpox data
-echo "Creating directory structure for Mpox data..."
-mkdir -p ${MPOX_DATA_DIR}/{images,masks,npz_inference,npz_train,npz_val,npy}
-
-# 12) Print summary and instructions
-echo "=========================================================="
-echo "MedSAM2 ENVIRONMENT SETUP COMPLETE (using venv)"
-echo "=========================================================="
-echo "Base directory: ${BASE_DIR}"
-echo "MedSAM2 code: ${MEDSAM_DIR}"
-echo "Checkpoints: ${CHECKPOINT_DIR}"
-echo "Mpox data: ${MPOX_DATA_DIR}"
-echo ""
-echo "To activate the environment in future scripts, source the activation script:"
-echo "source ${BASE_DIR}/activate_env.sh"
-echo ""
-echo "Next steps:"
-echo "1. Upload your Mpox images to ${MPOX_DATA_DIR}/images"
-echo "2. If available, upload your Mpox masks to ${MPOX_DATA_DIR}/masks"
-echo "3. Run the data preparation script: sbatch hpc_medsam2_dataprep.sh"
-echo "4. Run inference: sbatch hpc_medsam2_inference.sh"
-echo "5. (Optional) Fine-tune the model: sbatch hpc_medsam2_finetune.sh"
-echo "=========================================================="
-EOF
-    chmod +x ${SCRIPTS_DIR}/hpc_medsam2_setup.sh
+    SETUP_LOG=${LOG_DIR}/setup_log.txt
+    bash ${SCRIPTS_DIR}/hpc_medsam2_setup.sh 2>&1 | tee ${SETUP_LOG}
     
-    # Run setup script and save log
-    echo "Running environment setup script..."
-    ${SCRIPTS_DIR}/hpc_medsam2_setup.sh 2>&1 | tee ${LOG_DIR}/setup_log.txt
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Environment setup failed. Check ${LOG_DIR}/setup_log.txt for details."
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo "ERROR: Environment setup failed. Check ${SETUP_LOG} for details."
         exit 1
     fi
-    
-    echo "Environment setup completed successfully."
 fi
 
 # Source the environment activation script
-echo "Activating MedSAM2 environment..."
-source ${BASE_DIR}/activate_env.sh
-
-# 7) Data preparation
-if [ ${DO_DATAPREP} -eq 1 ]; then
-    echo "=========================================================="
-    echo "STEP 2: Preparing Mpox data"
-    echo "=========================================================="
-    
-    # Check if image directory is provided
-    if [ -z "${IMAGE_DIR}" ]; then
-        IMAGE_DIR=${MPOX_DATA_DIR}/images
-        echo "No image directory provided. Using default: ${IMAGE_DIR}"
-    fi
-    
-    # Check if mask directory is provided
-    if [ -z "${MASK_DIR}" ]; then
-        MASK_DIR=${MPOX_DATA_DIR}/masks
-        echo "No mask directory provided. Using default: ${MASK_DIR}"
-    fi
-    
-    # Create image and mask directories if they don't exist
-    mkdir -p ${IMAGE_DIR}
-    mkdir -p ${MASK_DIR}
-    
-    # Check if images exist
-    if [ ! -d "${IMAGE_DIR}" ] || [ -z "$(ls -A ${IMAGE_DIR} 2>/dev/null)" ]; then
-        echo "WARNING: No images found in ${IMAGE_DIR}."
-        echo "Please add your Mpox images to ${IMAGE_DIR} before running data preparation."
-        
-        # Ask if user wants to continue without images
-        echo "Do you want to skip data preparation and continue with the rest of the pipeline? [y/N]"
-        read -t 30 continue_without_images
-        
-        if [[ "${continue_without_images}" != "y" && "${continue_without_images}" != "Y" ]]; then
-            echo "Exiting. Please add images and run the pipeline again."
-            exit 1
-        else
-            echo "Continuing without data preparation..."
-            DO_DATAPREP=0
-        fi
-    fi
-    
-    if [ ${DO_DATAPREP} -eq 1 ]; then
-        # Copy the data preparation script to scripts directory
-        cp hpc_medsam2_dataprep.sh ${SCRIPTS_DIR}/
-        chmod +x ${SCRIPTS_DIR}/hpc_medsam2_dataprep.sh
-        
-        # Run data preparation script and save log
-        echo "Running data preparation script..."
-        ${SCRIPTS_DIR}/hpc_medsam2_dataprep.sh 2>&1 | tee ${LOG_DIR}/dataprep_log.txt
-        
-        if [ $? -ne 0 ]; then
-            echo "ERROR: Data preparation failed. Check ${LOG_DIR}/dataprep_log.txt for details."
-            exit 1
-        fi
-        
-        echo "Data preparation completed successfully."
-    fi
+if [ -f "${BASE_DIR}/activate_env.sh" ]; then
+    echo "Activating MedSAM2 environment..."
+    source ${BASE_DIR}/activate_env.sh
+else
+    echo "ERROR: Environment activation script not found at ${BASE_DIR}/activate_env.sh"
+    echo "Please run the setup step first."
+    exit 1
 fi
 
-# 8) Inference with pretrained model
-if [ ${DO_INFERENCE} -eq 1 ]; then
+# 5) COCO to mask conversion
+if [ ${DO_COCO} -eq 1 ]; then
     echo "=========================================================="
-    echo "STEP 3: Running inference with pretrained MedSAM2"
+    echo "STEP 2: Converting COCO annotations to masks"
     echo "=========================================================="
     
-    # Check if preprocessed data exists
-    NPZ_DIR=${MPOX_DATA_DIR}/npz_inference
+    COCO_LOG=${LOG_DIR}/coco_log.txt
     
-    if [ ! -d "${NPZ_DIR}" ] || [ -z "$(ls -A ${NPZ_DIR} 2>/dev/null)" ]; then
-        echo "ERROR: No preprocessed data found in ${NPZ_DIR}."
-        
-        if [ ${DO_DATAPREP} -eq 0 ]; then
-            echo "You skipped data preparation. Please run data preparation first or use --skip-inference option."
-            exit 1
-        else
-            echo "Data preparation was run but no data was produced. Check logs for errors."
-            exit 1
-        fi
-    fi
-    
-    # Copy the inference script to scripts directory
-    cp hpc_medsam2_inference.sh ${SCRIPTS_DIR}/
-    chmod +x ${SCRIPTS_DIR}/hpc_medsam2_inference.sh
-    
-    # Run inference script and save log
-    echo "Running inference script with pretrained model..."
-    ${SCRIPTS_DIR}/hpc_medsam2_inference.sh 2>&1 | tee ${LOG_DIR}/inference_log.txt
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Inference failed. Check ${LOG_DIR}/inference_log.txt for details."
+    # Check if COCO file exists
+    if [ ! -f "${COCO_FILE}" ]; then
+        echo "ERROR: COCO annotation file not found at ${COCO_FILE}."
         exit 1
     fi
     
-    echo "Inference with pretrained model completed successfully."
+    # Run COCO to mask conversion
+    python ${SCRIPTS_DIR}/coco_to_masks.py \
+        --coco_json ${COCO_FILE} \
+        --img_dir ${MPOX_DIR} \
+        --output_dir ${MPOX_DIR}/masks \
+        --visualize 2>&1 | tee ${COCO_LOG}
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo "ERROR: COCO to mask conversion failed. Check ${COCO_LOG} for details."
+        exit 1
+    fi
 fi
 
-# 9) Fine-tuning
-if [ ${DO_FINETUNE} -eq 1 ]; then
+# 6) Data preparation
+if [ ${DO_DATAPREP} -eq 1 ]; then
     echo "=========================================================="
-    echo "STEP 4: Fine-tuning MedSAM2 on Mpox data"
+    echo "STEP 3: Preparing Mpox data"
     echo "=========================================================="
     
-    # Check if NPY data exists for fine-tuning
-    NPY_DIR=${MPOX_DATA_DIR}/npy
+    DATAPREP_LOG=${LOG_DIR}/dataprep_log.txt
     
-    if [ ! -d "${NPY_DIR}" ] || [ -z "$(ls -A ${NPY_DIR} 2>/dev/null)" ]; then
-        echo "WARNING: No training data found in ${NPY_DIR}."
-        
-        # Check if masks exist
-        if [ -d "${MASK_DIR}" ] && [ ! -z "$(ls -A ${MASK_DIR} 2>/dev/null)" ]; then
-            echo "Mask images found, but training data was not prepared correctly."
-            echo "This could be due to an error in data preparation."
-            echo "Skipping fine-tuning."
-        else
-            echo "No mask images found in ${MASK_DIR}."
-            echo "Fine-tuning requires mask images for training."
-            echo "Please add mask images to ${MASK_DIR} and run the pipeline again with --skip-setup --skip-inference options."
-            echo "Skipping fine-tuning."
-        fi
-        
-        DO_FINETUNE=0
+    # Check if image and mask directories exist
+    if [ ! -d "${MPOX_DIR}" ]; then
+        echo "ERROR: Mpox image directory not found at ${MPOX_DIR}."
+        exit 1
     fi
     
-    if [ ${DO_FINETUNE} -eq 1 ]; then
-        # Copy the fine-tuning script to scripts directory
-        cp hpc_medsam2_finetune.sh ${SCRIPTS_DIR}/
-        chmod +x ${SCRIPTS_DIR}/hpc_medsam2_finetune.sh
+    if [ ! -d "${MPOX_DIR}/masks" ]; then
+        echo "ERROR: Masks directory not found at ${MPOX_DIR}/masks."
+        echo "Please run the COCO to mask conversion step first."
+        exit 1
+    fi
+    
+    # Run data preparation
+    python ${SCRIPTS_DIR}/mpox_data_prep.py \
+        --image_dir ${MPOX_DIR} \
+        --mask_dir ${MPOX_DIR}/masks \
+        --output_dir ${MPOX_DATA_DIR} \
+        --mode training \
+        --val_ratio 0.2 \
+        --target_size 1024 1024 \
+        --down_size 256 256 \
+        --num_workers $(nproc) \
+        --visualize 2>&1 | tee ${DATAPREP_LOG}
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo "ERROR: Data preparation failed. Check ${DATAPREP_LOG} for details."
+        exit 1
+    fi
+fi
+
+# 7) Fine-tuning
+if [ ${DO_FINETUNE} -eq 1 ]; then
+    echo "=========================================================="
+    echo "STEP 4: Fine-tuning SAM2 on Mpox data"
+    echo "=========================================================="
+    
+    FINETUNE_LOG=${LOG_DIR}/finetune_log.txt
+    FINETUNE_OUTPUT_DIR=${FINETUNE_DIR}/${RUN_NAME}
+    mkdir -p ${FINETUNE_OUTPUT_DIR}
+    
+    # Check if training data exists
+    if [ ! -d "${MPOX_DATA_DIR}/npy/imgs" ] || [ -z "$(ls -A ${MPOX_DATA_DIR}/npy/imgs 2>/dev/null)" ]; then
+        echo "ERROR: No training data found in ${MPOX_DATA_DIR}/npy/imgs."
+        echo "Please run the data preparation step first."
+        exit 1
+    fi
+    
+    # Check if checkpoint exists
+    SAM2_CHECKPOINT=${CHECKPOINT_DIR}/sam2.1_hiera_base_plus.pt
+    if [ ! -f "${SAM2_CHECKPOINT}" ]; then
+        echo "ERROR: SAM2 checkpoint not found at ${SAM2_CHECKPOINT}."
+        echo "Please download the checkpoint first."
+        exit 1
+    fi
+    
+    # Set batch size based on available GPU memory
+    BATCH_SIZE=32
+    if [[ $(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1) -lt 16000 ]]; then
+        BATCH_SIZE=16
+        echo "Limited GPU memory detected, reducing batch size to ${BATCH_SIZE}"
+    fi
+    
+    # Run fine-tuning
+    python ${SCRIPTS_DIR}/finetune_medsam2_mpox.py \
+        --data_dir ${MPOX_DATA_DIR}/npy \
+        --output_dir ${FINETUNE_OUTPUT_DIR} \
+        --sam2_checkpoint ${SAM2_CHECKPOINT} \
+        --model_cfg "sam2.1_hiera_b+.yaml" \
+        --batch_size ${BATCH_SIZE} \
+        --num_epochs 30 \
+        --learning_rate 1e-5 \
+        --bbox_shift 10 \
+        --device cuda \
+        --num_workers 16 \
+        --vis_samples 8 2>&1 | tee ${FINETUNE_LOG}
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo "ERROR: Fine-tuning failed. Check ${FINETUNE_LOG} for details."
+        exit 1
+    fi
+    
+    # Copy the final model to a standard location
+    FINAL_MODEL=${FINETUNE_OUTPUT_DIR}/medsam2_mpox_final.pth
+    STANDARD_MODEL=${BASE_DIR}/medsam2_mpox.pth
+    cp ${FINAL_MODEL} ${STANDARD_MODEL}
+    
+    # Create a symbolic link to the latest fine-tuning run
+    LATEST_FINETUNE_LINK=${BASE_DIR}/latest_finetune
+    rm -f ${LATEST_FINETUNE_LINK} 2>/dev/null
+    ln -s ${FINETUNE_OUTPUT_DIR} ${LATEST_FINETUNE_LINK}
+fi
+
+# 8) Inference
+if [ ${DO_INFERENCE} -eq 1 ]; then
+    echo "=========================================================="
+    echo "STEP 5: Running inference with SAM2 and fine-tuned models"
+    echo "=========================================================="
+    
+    INFERENCE_LOG=${LOG_DIR}/inference_log.txt
+    INFERENCE_OUTPUT_DIR=${RESULTS_DIR}/${RUN_NAME}
+    mkdir -p ${INFERENCE_OUTPUT_DIR}
+    
+    # Check if inference data exists
+    if [ ! -d "${MPOX_DATA_DIR}/npz_inference" ] || [ -z "$(ls -A ${MPOX_DATA_DIR}/npz_inference 2>/dev/null)" ]; then
+        echo "ERROR: No inference data found in ${MPOX_DATA_DIR}/npz_inference."
+        echo "Please run the data preparation step first."
+        exit 1
+    fi
+    
+    # Set model paths
+    SAM2_CHECKPOINT=${CHECKPOINT_DIR}/sam2.1_hiera_base_plus.pt
+    FINETUNED_MODEL=${BASE_DIR}/medsam2_mpox.pth
+    
+    # Run inference with base model
+    BASE_OUTPUT_DIR=${INFERENCE_OUTPUT_DIR}/base_model
+    mkdir -p ${BASE_OUTPUT_DIR}
+    
+    python ${SCRIPTS_DIR}/run_medsam2_inference.py \
+        --input_dir ${MPOX_DATA_DIR}/npz_inference \
+        --output_dir ${BASE_OUTPUT_DIR} \
+        --sam2_checkpoint ${SAM2_CHECKPOINT} \
+        --model_cfg "sam2.1_hiera_b+.yaml" \
+        --prompt_method box \
+        --bbox_shift 10 \
+        --device cuda \
+        --num_workers $(nproc) 2>&1 | tee ${INFERENCE_LOG}
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo "ERROR: Base model inference failed. Check ${INFERENCE_LOG} for details."
+        exit 1
+    fi
+    
+    # Run inference with fine-tuned model (if available)
+    if [ -f "${FINETUNED_MODEL}" ]; then
+        FINETUNED_OUTPUT_DIR=${INFERENCE_OUTPUT_DIR}/finetuned_model
+        mkdir -p ${FINETUNED_OUTPUT_DIR}
         
-        # Run fine-tuning script and save log
-        echo "Running fine-tuning script..."
-        ${SCRIPTS_DIR}/hpc_medsam2_finetune.sh 2>&1 | tee ${LOG_DIR}/finetune_log.txt
+        python ${SCRIPTS_DIR}/run_medsam2_inference.py \
+            --input_dir ${MPOX_DATA_DIR}/npz_inference \
+            --output_dir ${FINETUNED_OUTPUT_DIR} \
+            --sam2_checkpoint ${SAM2_CHECKPOINT} \
+            --medsam2_checkpoint ${FINETUNED_MODEL} \
+            --model_cfg "sam2.1_hiera_b+.yaml" \
+            --prompt_method box \
+            --bbox_shift 10 \
+            --device cuda \
+            --num_workers $(nproc) 2>&1 | tee -a ${INFERENCE_LOG}
         
-        if [ $? -ne 0 ]; then
-            echo "ERROR: Fine-tuning failed. Check ${LOG_DIR}/finetune_log.txt for details."
+        if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "ERROR: Fine-tuned model inference failed. Check ${INFERENCE_LOG} for details."
+            exit 1
+        fi
+    fi
+    
+    # Create a symbolic link to the latest inference run
+    LATEST_INFERENCE_LINK=${BASE_DIR}/latest_inference
+    rm -f ${LATEST_INFERENCE_LINK} 2>/dev/null
+    ln -s ${INFERENCE_OUTPUT_DIR} ${LATEST_INFERENCE_LINK}
+fi
+
+# 9) Evaluation
+if [ ${DO_EVALUATE} -eq 1 ]; then
+    echo "=========================================================="
+    echo "STEP 6: Evaluating model performance"
+    echo "=========================================================="
+    
+    EVAL_LOG=${LOG_DIR}/evaluation_log.txt
+    EVAL_OUTPUT_DIR=${EVALUATION_DIR}/${RUN_NAME}
+    mkdir -p ${EVAL_OUTPUT_DIR}
+    
+    # Define prediction and ground truth directories
+    INFERENCE_DIR=${RESULTS_DIR}/${RUN_NAME}
+    BASE_PRED_DIR=${INFERENCE_DIR}/base_model/masks
+    FINETUNED_PRED_DIR=${INFERENCE_DIR}/finetuned_model/masks
+    GT_DIR=${MPOX_DATA_DIR}/npz_val
+    
+    # Check if prediction directories exist
+    if [ ! -d "${BASE_PRED_DIR}" ]; then
+        echo "ERROR: Base model predictions not found at ${BASE_PRED_DIR}."
+        echo "Please run the inference step first."
+        exit 1
+    fi
+    
+    # Run evaluation for base model
+    BASE_EVAL_DIR=${EVAL_OUTPUT_DIR}/base_model
+    mkdir -p ${BASE_EVAL_DIR}
+    
+    python ${SCRIPTS_DIR}/evaluate_medsam2.py \
+        --pred_dir ${BASE_PRED_DIR} \
+        --gt_dir ${GT_DIR} \
+        --output_dir ${BASE_EVAL_DIR} \
+        --num_workers $(nproc) 2>&1 | tee ${EVAL_LOG}
+    
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+        echo "ERROR: Base model evaluation failed. Check ${EVAL_LOG} for details."
+        exit 1
+    fi
+    
+    # Run evaluation for fine-tuned model and comparison (if available)
+    if [ -d "${FINETUNED_PRED_DIR}" ]; then
+        FINETUNED_EVAL_DIR=${EVAL_OUTPUT_DIR}/finetuned_model
+        mkdir -p ${FINETUNED_EVAL_DIR}
+        
+        python ${SCRIPTS_DIR}/evaluate_medsam2.py \
+            --pred_dir ${FINETUNED_PRED_DIR} \
+            --gt_dir ${GT_DIR} \
+            --output_dir ${FINETUNED_EVAL_DIR} \
+            --num_workers $(nproc) 2>&1 | tee -a ${EVAL_LOG}
+        
+        if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "ERROR: Fine-tuned model evaluation failed. Check ${EVAL_LOG} for details."
             exit 1
         fi
         
-        echo "Fine-tuning completed successfully."
+        # Compare the two models
+        COMPARISON_DIR=${EVAL_OUTPUT_DIR}/comparison
+        mkdir -p ${COMPARISON_DIR}
+        
+        python ${SCRIPTS_DIR}/evaluate_medsam2.py \
+            --pred_dir ${BASE_PRED_DIR} \
+            --gt_dir ${GT_DIR} \
+            --output_dir ${COMPARISON_DIR} \
+            --compare ${FINETUNED_PRED_DIR} \
+            --model_names "SAM2-Base" "MedSAM2-Mpox" \
+            --num_workers $(nproc) 2>&1 | tee -a ${EVAL_LOG}
+        
+        if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "ERROR: Model comparison failed. Check ${EVAL_LOG} for details."
+            exit 1
+        fi
     fi
+    
+    # Create a symbolic link to the latest evaluation
+    LATEST_EVAL_LINK=${BASE_DIR}/latest_evaluation
+    rm -f ${LATEST_EVAL_LINK} 2>/dev/null
+    ln -s ${EVAL_OUTPUT_DIR} ${LATEST_EVAL_LINK}
 fi
 
 # 10) Print summary and next steps
@@ -480,24 +411,32 @@ echo ""
 # Check which steps were executed
 steps_executed=""
 if [ ${DO_SETUP} -eq 1 ]; then steps_executed="${steps_executed} Setup"; fi
+if [ ${DO_COCO} -eq 1 ]; then steps_executed="${steps_executed} COCO2Mask"; fi
 if [ ${DO_DATAPREP} -eq 1 ]; then steps_executed="${steps_executed} DataPrep"; fi
-if [ ${DO_INFERENCE} -eq 1 ]; then steps_executed="${steps_executed} Inference"; fi
 if [ ${DO_FINETUNE} -eq 1 ]; then steps_executed="${steps_executed} Finetune"; fi
+if [ ${DO_INFERENCE} -eq 1 ]; then steps_executed="${steps_executed} Inference"; fi
+if [ ${DO_EVALUATE} -eq 1 ]; then steps_executed="${steps_executed} Evaluate"; fi
 
 echo "Steps executed:${steps_executed}"
 echo ""
 
 # Create a symlink to the latest run
-LATEST_LINK=${BASE_DIR}/latest_run
-rm -f ${LATEST_LINK} 2>/dev/null
-ln -s ${RUN_DIR} ${LATEST_LINK}
-echo "Created symbolic link to the latest run: ${LATEST_LINK}"
+LATEST_RUN_LINK=${BASE_DIR}/latest_run
+rm -f ${LATEST_RUN_LINK} 2>/dev/null
+ln -s ${RUN_DIR} ${LATEST_RUN_LINK}
+echo "Created symbolic link to the latest run: ${LATEST_RUN_LINK}"
+echo ""
+
+echo "Results Summary:"
+echo "  - Fine-tuned model: ${BASE_DIR}/medsam2_mpox.pth"
+echo "  - Inference results: ${RESULTS_DIR}/${RUN_NAME}"
+echo "  - Evaluation results: ${EVALUATION_DIR}/${RUN_NAME}"
 echo ""
 
 echo "Next steps:"
-echo "1. Review the logs in ${LOG_DIR}"
-echo "2. Check the results of inference and fine-tuning (if run)"
-echo "3. Use the fine-tuned model for inference on new images (if fine-tuning was run)"
+echo "1. Review the evaluation metrics and visualizations"
+echo "2. Use the fine-tuned model for inference on new images"
+echo "3. Further improve the model with additional data if needed"
 echo "=========================================================="
 
 # Record end time
