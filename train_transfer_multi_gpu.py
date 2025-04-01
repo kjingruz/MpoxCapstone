@@ -587,7 +587,7 @@ def create_datasets(ph2_dir, mpox_dir, target_size=(256, 256)):
         
         # Lighting changes to simulate different clinical environments
         A.RandomGamma(gamma_limit=(80, 120), p=0.3),
-        A.RandomBrightness(limit=0.2, p=0.3),
+        # A.RandomBrightness(limit=0.2, p=0.3),  # THIS LINE CAUSES THE ERROR - REMOVED
         
         # Texture and pattern augmentations
         A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.2),
