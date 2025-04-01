@@ -109,7 +109,7 @@ if [ ${DO_SETUP} -eq 1 ]; then
     echo "=========================================================="
     
     SETUP_LOG=${LOG_DIR}/setup_log.txt
-    bash ${SCRIPTS_DIR}/hpc_medsam2_setup.sh 2>&1 | tee ${SETUP_LOG}
+    bash ${BASE_DIR}/hpc_medsam2_setup.sh 2>&1 | tee ${SETUP_LOG}
     
     if [ ${PIPESTATUS[0]} -ne 0 ]; then
         echo "ERROR: Environment setup failed. Check ${SETUP_LOG} for details."
