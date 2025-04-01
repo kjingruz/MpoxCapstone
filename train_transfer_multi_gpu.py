@@ -93,54 +93,49 @@ class FocalLoss(nn.Module):
 
 # Enhanced combined loss with regularization
 class EnhancedCombinedLoss(nn.Module):
-    def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.001):
+    def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=0.0001):
         super(EnhancedCombinedLoss, self).__init__()
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         self.reg_weight = reg_weight
-        self.bce = nn.BCEWithLogitsLoss()
+        pos_weight = torch.ones_like(targets) * 0.3  # Strongly reduce weight for positive predictions
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         self.dice = DiceLoss()
-        self.focal = FocalLoss(alpha=0.8, gamma=2.0)
-        
-        # Initialize pos_weight as None, we'll set it based on input device later
-        self.pos_weight = None
+        self.focal = FocalLoss(alpha=0.25, gamma=2.0)  # Decrease alpha to reduce false positives
         
     def forward(self, logits, targets, model=None):
         # Ensure targets has the same shape as logits
         if len(targets.shape) == 3:
             targets = targets.unsqueeze(1)
         
-        # Ensure float type (critical for loss computation)
+        # Ensure float type
         targets = targets.float()
-        
-        # Get device from inputs to ensure everything is on the same device
         device = logits.device
-        
-        # Update BCE loss with pos_weight if needed, ensuring it's on the right device
-        if hasattr(self, 'pos_weight') and self.pos_weight is not None:
-            # Create pos_weight tensor on the right device
-            pos_weight = torch.tensor([self.pos_weight], device=device)
-            self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         
         # Calculate individual losses
         bce_loss = self.bce(logits, targets)
         dice_loss = self.dice(logits, targets)
         focal_loss = self.focal(logits, targets)
         
-        # L2 regularization if model is provided
-        reg_loss = 0.0
+        # More controlled regularization
+        reg_loss = torch.tensor(0.0, device=device)
         if model is not None and self.reg_weight > 0:
-            for param in model.parameters():
-                reg_loss += torch.norm(param, 2)
+            for name, param in model.named_parameters():
+                if param.requires_grad and 'weight' in name:
+                    reg_loss = reg_loss + torch.norm(param, 2)
         
-        # Combined loss
-        return (self.bce_weight * bce_loss + 
-                self.dice_weight * dice_loss + 
-                self.focal_weight * focal_loss + 
-                self.reg_weight * reg_loss)
+        # Scale to prevent huge negative values
+        # Use absolute values for dice loss to prevent negative values
+        combined_loss = (
+            self.bce_weight * bce_loss + 
+            self.dice_weight * abs(dice_loss) + 
+            self.focal_weight * focal_loss + 
+            self.reg_weight * reg_loss
+        )
         
-# Improved combined loss with proper regularization and device handling
+        return combined_loss
+        
 # Improved combined loss with proper regularization and device handling
 class ImprovedCombinedLoss(nn.Module):
     def __init__(self, bce_weight=0.3, dice_weight=0.5, focal_weight=0.2, reg_weight=1e-5, 
@@ -268,6 +263,10 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, mpox_threshold=0
                 # Use different threshold based on dataset type
                 curr_threshold = mpox_threshold if dataset_type[i].lower() == 'mpox' else threshold
                 pred = (preds[i, 0] > curr_threshold).float().cpu().numpy()
+                
+                # Apply post-processing to remove small connected components
+                pred = apply_postprocessing(pred, min_size=50)
+                
                 mask = masks[i, 0].cpu().numpy()
                 
                 # Convert to binary
@@ -326,9 +325,7 @@ def evaluate_clinical_metrics(model, dataloader, threshold=0.7, mpox_threshold=0
     }
 
 def visualize_predictions(model, dataloader, device, num_samples=3, threshold=0.7, output_dir=None, rank=0):
-    """
-    Visualize model predictions (only run on rank 0)
-    """
+    """Visualize model predictions (only run on rank 0)"""
     if rank != 0:
         return
         
@@ -350,7 +347,7 @@ def visualize_predictions(model, dataloader, device, num_samples=3, threshold=0.
             outputs = model(images)
             
             # Apply sigmoid and custom threshold
-            preds = torch.sigmoid(outputs) > threshold
+            preds = (torch.sigmoid(outputs) > threshold).float()
             
             # Loop through batch
             for j in range(images.shape[0]):
@@ -365,6 +362,9 @@ def visualize_predictions(model, dataloader, device, num_samples=3, threshold=0.
                 
                 pred = preds[j, 0].cpu().numpy()  # Take channel 0
                 
+                # Apply post-processing
+                pred_processed = apply_postprocessing(pred, min_size=50)
+                
                 # Transpose from CHW to HWC for visualization
                 image = np.transpose(image, (1, 2, 0))
                 
@@ -374,8 +374,8 @@ def visualize_predictions(model, dataloader, device, num_samples=3, threshold=0.
                 image = std * image + mean
                 image = np.clip(image, 0, 1)
                 
-                # Create figure
-                fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                # Create figure with extra subplot for processed prediction
+                fig, axes = plt.subplots(1, 4, figsize=(20, 5))
                 
                 # Plot original image
                 axes[0].imshow(image)
@@ -390,10 +390,15 @@ def visualize_predictions(model, dataloader, device, num_samples=3, threshold=0.
                 axes[1].set_title('Ground Truth')
                 axes[1].axis('off')
                 
-                # Plot prediction
+                # Plot raw prediction
                 axes[2].imshow(pred, cmap='gray')
-                axes[2].set_title(f'Prediction (threshold={threshold})')
+                axes[2].set_title(f'Raw Prediction (t={threshold})')
                 axes[2].axis('off')
+                
+                # Plot processed prediction
+                axes[3].imshow(pred_processed, cmap='gray')
+                axes[3].set_title('Processed Prediction')
+                axes[3].axis('off')
                 
                 plt.tight_layout()
                 
@@ -770,6 +775,27 @@ def load_pretrained_encoder(pretrained_path, model_type='standard', device='cuda
     
     print(f"Loaded pretrained encoder from {pretrained_path}")
     return encoder
+
+def apply_postprocessing(pred_mask, min_size=50):
+    """Remove small connected components that are likely false positives"""
+    # Convert to numpy for processing
+    if isinstance(pred_mask, torch.Tensor):
+        pred_mask = pred_mask.cpu().numpy()
+    
+    # Label connected components
+    from scipy import ndimage
+    labeled, num_features = ndimage.label(pred_mask)
+    
+    # Get component sizes
+    component_sizes = np.bincount(labeled.ravel())
+    
+    # Create new mask with only large enough components
+    processed_mask = np.zeros_like(pred_mask)
+    for i in range(1, num_features + 1):  # Skip background (0)
+        if component_sizes[i] >= min_size:
+            processed_mask[labeled == i] = 1
+    
+    return processed_mask
 
 def plot_history(history, output_dir, rank=0):
     """Plot training history metrics (only from rank 0)"""
