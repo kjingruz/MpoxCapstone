@@ -28,8 +28,10 @@ def coco_to_binary_masks(coco_json_path, img_dir, output_dir, visualize=False):
     
     # Create mapping from image ID to filename
     image_id_to_filename = {}
+    image_id_to_size = {}  # To store image dimensions
     for image in coco_data['images']:
         image_id_to_filename[image['id']] = image['file_name']
+        image_id_to_size[image['id']] = (image['height'], image['width'])
     
     # Create mapping from image ID to annotations
     image_id_to_annotations = {}
@@ -50,18 +52,8 @@ def coco_to_binary_masks(coco_json_path, img_dir, output_dir, visualize=False):
         image_id = image['id']
         filename = image['file_name']
         
-        # Read the image to get dimensions
-        img_path = os.path.join(img_dir, filename)
-        if not os.path.exists(img_path):
-            print(f"Warning: Image {img_path} not found, skipping.")
-            continue
-            
-        img = cv2.imread(img_path)
-        if img is None:
-            print(f"Warning: Could not read image {img_path}, skipping.")
-            continue
-            
-        height, width = img.shape[:2]
+        # Get image dimensions from COCO data
+        height, width = image_id_to_size[image_id]
         
         # Create an empty mask
         mask = np.zeros((height, width), dtype=np.uint8)
@@ -72,22 +64,77 @@ def coco_to_binary_masks(coco_json_path, img_dir, output_dir, visualize=False):
         # Draw each segmentation on the mask
         for ann in annotations:
             if 'segmentation' in ann:
-                if isinstance(ann['segmentation'], dict):  # RLE format
-                    rle = ann['segmentation']
-                    binary_mask = coco_mask.decode(rle)
-                    mask = np.logical_or(mask, binary_mask).astype(np.uint8)
-                else:  # Polygon format
+                # Handle RLE format
+                if isinstance(ann['segmentation'], dict) or (isinstance(ann['segmentation'], list) and len(ann['segmentation']) > 0 and isinstance(ann['segmentation'][0], dict)):
+                    try:
+                        # This is likely an RLE encoded mask
+                        if isinstance(ann['segmentation'], dict):
+                            rle = ann['segmentation']
+                        else:
+                            rle = ann['segmentation'][0]  # Take the first one if it's a list
+                        
+                        # Directly convert using pycocotools if format is correct
+                        if 'counts' in rle and 'size' in rle:
+                            rle_obj = {
+                                'counts': rle['counts'],
+                                'size': rle['size']
+                            }
+                            binary_mask = coco_mask.decode(rle_obj)
+                            mask = np.logical_or(mask, binary_mask).astype(np.uint8)
+                    except Exception as e:
+                        print(f"Error decoding RLE for annotation {ann['id']}: {e}")
+                        # Fall back to using the bounding box if available
+                        if 'bbox' in ann:
+                            bbox = ann['bbox']  # [x, y, width, height]
+                            x, y, w, h = map(int, bbox)
+                            # Fill a rectangular mask for this bbox
+                            mask[y:y+h, x:x+w] = 1
+                
+                # Handle polygon format
+                elif isinstance(ann['segmentation'], list):
                     for seg in ann['segmentation']:
-                        # Convert polygon to mask
-                        poly = np.array(seg).reshape(-1, 2)
-                        cv2.fillPoly(mask, [poly.astype(np.int32)], 1)
+                        if isinstance(seg, list) and len(seg) >= 6:  # Min 3 points (x,y) for a polygon
+                            # Convert polygon to mask
+                            try:
+                                poly = np.array(seg).reshape(-1, 2)
+                                cv2.fillPoly(mask, [poly.astype(np.int32)], 1)
+                            except Exception as e:
+                                print(f"Error with polygon annotation {ann['id']}: {e}")
+            
+            # Fallback to bbox if segmentation fails or is not available
+            elif 'bbox' in ann:
+                bbox = ann['bbox']  # [x, y, width, height]
+                x, y, w, h = map(int, bbox)
+                # Fill a rectangular mask for this bbox
+                mask[y:y+h, x:x+w] = 1
+        
+        # Read the actual image to verify and for visualization
+        img_path = os.path.join(img_dir, filename)
+        img = None
+        if visualize or not mask.any():  # Only read image if we need visualization or mask is empty
+            if os.path.exists(img_path):
+                img = cv2.imread(img_path)
+                if img is None:
+                    print(f"Warning: Could not read image {img_path}")
+            else:
+                print(f"Warning: Image {img_path} not found")
+        
+        # Fallback for empty masks - create a central region
+        if not mask.any() and img is not None:
+            h, w = img.shape[:2]
+            center_y, center_x = h // 2, w // 2
+            radius = min(h, w) // 4
+            Y, X = np.ogrid[:h, :w]
+            dist_from_center = np.sqrt((X - center_x)**2 + (Y - center_y)**2)
+            mask = (dist_from_center <= radius).astype(np.uint8)
+            print(f"Warning: Created fallback mask for {filename} as no valid segmentation found")
         
         # Save the mask
         mask_filename = os.path.splitext(filename)[0] + "_mask.png"
         cv2.imwrite(os.path.join(output_dir, mask_filename), mask * 255)
         
         # Visualize mask overlay if requested
-        if visualize:
+        if visualize and img is not None:
             plt.figure(figsize=(12, 6))
             
             # Original image
