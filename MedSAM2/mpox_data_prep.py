@@ -2,7 +2,6 @@
 """
 Data preparation script for Mpox lesion segmentation with MedSAM2.
 This script prepares Mpox image data into the format required by MedSAM2.
-It handles both standard inference and fine-tuning data preparation.
 """
 
 import os
@@ -31,7 +30,29 @@ def find_images(directory, extensions=['.jpg', '.jpeg', '.png', '.bmp']):
         image_files.extend(list(Path(directory).glob(f"**/*{ext}")))
     return sorted(image_files)
 
-def process_image_for_inference(image_path, output_dir, target_size=(256, 256)):
+def preprocess_image(image, target_size=(1024, 1024)):
+    """Preprocess image for MedSAM2 model."""
+    # Convert BGR to RGB if needed
+    if image.shape[2] == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    
+    # Resize image (preserve aspect ratio)
+    h, w = image.shape[:2]
+    ratio = min(target_size[0] / h, target_size[1] / w)
+    new_h, new_w = int(h * ratio), int(w * ratio)
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    
+    # Create a black canvas of target size
+    canvas = np.zeros((target_size[0], target_size[1], 3), dtype=np.uint8)
+    
+    # Paste the resized image onto the canvas (center it)
+    y_offset = (target_size[0] - new_h) // 2
+    x_offset = (target_size[1] - new_w) // 2
+    canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+    
+    return canvas
+
+def process_image_for_inference(image_path, output_dir, target_size=(1024, 1024)):
     """Process a single image for inference with MedSAM2."""
     # Load image
     image = cv2.imread(str(image_path))
@@ -39,14 +60,11 @@ def process_image_for_inference(image_path, output_dir, target_size=(256, 256)):
         print(f"Error reading image: {image_path}")
         return None
     
-    # Convert BGR to RGB
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # Preprocess the image
+    processed_image = preprocess_image(image, target_size)
     
     # Get original dimensions
     orig_h, orig_w = image.shape[:2]
-    
-    # Resize image
-    image_resized = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
     
     # Create filename for npz
     stem = image_path.stem
@@ -55,14 +73,14 @@ def process_image_for_inference(image_path, output_dir, target_size=(256, 256)):
     # Save image and metadata to npz
     np.savez_compressed(
         npz_filename,
-        image=image_resized,
+        image=processed_image,
         orig_size=np.array([orig_h, orig_w]),
         filename=str(image_path.name)
     )
     
     return npz_filename
 
-def process_image_and_mask(image_path, mask_path, output_dir, target_size=(256, 256), split='train'):
+def process_image_and_mask(image_path, mask_path, output_dir, target_size=(1024, 1024), down_size=(256, 256), split='train'):
     """Process an image and its mask for training with MedSAM2."""
     # Load image
     image = cv2.imread(str(image_path))
@@ -70,8 +88,8 @@ def process_image_and_mask(image_path, mask_path, output_dir, target_size=(256, 
         print(f"Error reading image: {image_path}")
         return None
     
-    # Convert BGR to RGB
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # Preprocess the image
+    processed_image = preprocess_image(image, target_size)
     
     # Determine mask path if not provided directly
     if mask_path is None:
@@ -99,15 +117,25 @@ def process_image_and_mask(image_path, mask_path, output_dir, target_size=(256, 
         return None
     
     # Binarize mask if needed
-    if mask.max() > 1:
-        mask = (mask > 0).astype(np.uint8)
+    mask = (mask > 0).astype(np.uint8)
+    
+    # Resize mask to match the processed image size
+    h, w = image.shape[:2]
+    ratio = min(target_size[0] / h, target_size[1] / w)
+    new_h, new_w = int(h * ratio), int(w * ratio)
+    
+    mask_resized = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+    
+    # Create a black canvas of target size
+    mask_canvas = np.zeros(target_size, dtype=np.uint8)
+    
+    # Paste the resized mask onto the canvas (center it)
+    y_offset = (target_size[0] - new_h) // 2
+    x_offset = (target_size[1] - new_w) // 2
+    mask_canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = mask_resized
     
     # Get original dimensions
     orig_h, orig_w = image.shape[:2]
-    
-    # Resize image and mask
-    image_resized = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
-    mask_resized = cv2.resize(mask, target_size, interpolation=cv2.INTER_NEAREST)
     
     # For training data, create both npz and npy formats
     npz_dir = os.path.join(output_dir, f"npz_{split}")
@@ -118,8 +146,8 @@ def process_image_and_mask(image_path, mask_path, output_dir, target_size=(256, 
     npz_filename = os.path.join(npz_dir, f"{stem}.npz")
     
     # Calculate bounding box from mask
-    if mask_resized.sum() > 0:  # If the mask is not empty
-        y_indices, x_indices = np.where(mask_resized > 0)
+    if mask_canvas.sum() > 0:  # If the mask is not empty
+        y_indices, x_indices = np.where(mask_canvas > 0)
         x_min, x_max = np.min(x_indices), np.max(x_indices)
         y_min, y_max = np.min(y_indices), np.max(y_indices)
         bbox = np.array([x_min, y_min, x_max, y_max])
@@ -127,31 +155,36 @@ def process_image_and_mask(image_path, mask_path, output_dir, target_size=(256, 
         # Handle empty masks by using a default small box in the center
         h, w = target_size
         center_x, center_y = w // 2, h // 2
-        size = 10  # Small default size
+        size = min(h, w) // 10
         bbox = np.array([center_x - size, center_y - size, center_x + size, center_y + size])
     
     # Save image, mask, and metadata to npz
     np.savez_compressed(
         npz_filename,
-        image=image_resized,
-        mask=mask_resized,
+        image=processed_image,
+        mask=mask_canvas,
         bbox=bbox,
         orig_size=np.array([orig_h, orig_w]),
         filename=str(image_path.name)
     )
     
-    # For training split, also save as npy files
+    # For training split, also save as npy files (downsized version for training efficiency)
     if split == 'train':
         npy_dir = os.path.join(output_dir, "npy")
-        ensure_dir(npy_dir)
+        ensure_dir(os.path.join(npy_dir, "imgs"))
+        ensure_dir(os.path.join(npy_dir, "gts"))
+        
+        # Create downsized (256x256) versions for training efficiency
+        img_down = cv2.resize(processed_image, down_size, interpolation=cv2.INTER_AREA)
+        mask_down = cv2.resize(mask_canvas, down_size, interpolation=cv2.INTER_NEAREST)
         
         # Save image and mask as separate npy files
-        np.save(os.path.join(npy_dir, f"{stem}_img.npy"), image_resized)
-        np.save(os.path.join(npy_dir, f"{stem}_mask.npy"), mask_resized)
+        np.save(os.path.join(npy_dir, "imgs", f"{stem}.npy"), img_down)
+        np.save(os.path.join(npy_dir, "gts", f"{stem}.npy"), mask_down)
     
     return npz_filename
 
-def prepare_data_for_inference(image_dir, output_dir, num_workers=4, target_size=(256, 256)):
+def prepare_data_for_inference(image_dir, output_dir, num_workers=4, target_size=(1024, 1024)):
     """Prepare the data for inference with MedSAM2."""
     # Find all images
     image_files = find_images(image_dir)
@@ -183,7 +216,7 @@ def prepare_data_for_inference(image_dir, output_dir, num_workers=4, target_size
     return npz_dir
 
 def prepare_data_for_training(image_dir, mask_dir, output_dir, 
-                            val_ratio=0.2, num_workers=4, target_size=(256, 256)):
+                            val_ratio=0.2, num_workers=4, target_size=(1024, 1024), down_size=(256, 256)):
     """Prepare the data for training/fine-tuning MedSAM2."""
     # Find all images
     image_files = find_images(image_dir)
@@ -212,25 +245,43 @@ def prepare_data_for_training(image_dir, mask_dir, output_dir,
         mask_files = find_images(mask_dir, extensions=['.png', '.jpg', '.jpeg', '.bmp'])
         
         # Create a mapping from image stem to mask path
-        mask_map = {Path(m).stem.replace('_mask', ''): m for m in mask_files}
+        mask_map = {}
+        for m in mask_files:
+            # Try different stem variations to match with original images
+            mask_stem = m.stem
+            if "_mask" in mask_stem:
+                orig_stem = mask_stem.replace("_mask", "")
+                mask_map[orig_stem] = m
+            else:
+                mask_map[mask_stem] = m
         
         # Assign mask to each image
-        image_mask_pairs_train = [(img, mask_map.get(img.stem)) for img in train_files]
-        image_mask_pairs_val = [(img, mask_map.get(img.stem)) for img in val_files]
+        image_mask_pairs_train = []
+        for img in train_files:
+            mask = mask_map.get(img.stem)
+            if mask:
+                image_mask_pairs_train.append((img, mask))
+            else:
+                print(f"No mask found for {img.stem}")
+        
+        image_mask_pairs_val = []
+        for img in val_files:
+            mask = mask_map.get(img.stem)
+            if mask:
+                image_mask_pairs_val.append((img, mask))
+            else:
+                print(f"No mask found for {img.stem}")
     else:
         # If masks are expected to be alongside images or follow a naming pattern
         image_mask_pairs_train = [(img, None) for img in train_files]
         image_mask_pairs_val = [(img, None) for img in val_files]
-    
-    # Filter out pairs where mask is None
-    image_mask_pairs_train = [(img, mask) for img, mask in image_mask_pairs_train if mask is not None]
-    image_mask_pairs_val = [(img, mask) for img, mask in image_mask_pairs_val if mask is not None]
     
     # Process training images and masks
     train_process_func = partial(
         process_image_and_mask, 
         output_dir=output_dir, 
         target_size=target_size,
+        down_size=down_size,
         split='train'
     )
     
@@ -249,6 +300,7 @@ def prepare_data_for_training(image_dir, mask_dir, output_dir,
         process_image_and_mask, 
         output_dir=output_dir, 
         target_size=target_size,
+        down_size=down_size,
         split='val'
     )
     
@@ -327,7 +379,7 @@ def visualize_samples(npz_dir, output_dir, num_samples=5):
         plt.savefig(os.path.join(vis_dir, f"sample_{i+1}.png"))
         plt.close()
     
-    print(f"Saved {num_samples} sample visualizations to {vis_dir}")
+    print(f"Saved {len(samples)} sample visualizations to {vis_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare Mpox data for MedSAM2")
@@ -338,8 +390,10 @@ def main():
                         help="Prepare data for inference or training/fine-tuning")
     parser.add_argument("--val_ratio", type=float, default=0.2, 
                         help="Validation set ratio (for training mode)")
-    parser.add_argument("--target_size", type=int, default=256,
-                        help="Target size for resizing images")
+    parser.add_argument("--target_size", type=int, nargs=2, default=[1024, 1024],
+                        help="Target size for processing images (height width)")
+    parser.add_argument("--down_size", type=int, nargs=2, default=[256, 256],
+                        help="Size for training npy files (height width)")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="Number of parallel workers")
     parser.add_argument("--visualize", action="store_true",
@@ -356,7 +410,7 @@ def main():
             args.image_dir, 
             args.output_dir,
             args.num_workers,
-            target_size=(args.target_size, args.target_size)
+            tuple(args.target_size)
         )
         
         if args.visualize and npz_dir:
@@ -368,7 +422,8 @@ def main():
             args.output_dir,
             args.val_ratio,
             args.num_workers,
-            target_size=(args.target_size, args.target_size)
+            tuple(args.target_size),
+            tuple(args.down_size)
         )
         
         if args.visualize:
