@@ -88,7 +88,7 @@ def compute_metrics(pred_mask, gt_mask):
     except Exception as e:
         hausdorff_dist = np.nan
     
-    # Calculate Boundary F1 score (adapted from MedSAM2 paper)
+    # Calculate Boundary F1 score
     try:
         # Get contours of masks
         pred_contours, _ = cv2.findContours(pred_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
@@ -525,6 +525,8 @@ def main():
         
         # Compare models
         compare_models(model_results, args.output_dir)
+    
+    print(f"Evaluation completed. Results saved to {args.output_dir}")
 
 if __name__ == "__main__":
     main()
