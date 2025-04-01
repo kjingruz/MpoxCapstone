@@ -432,7 +432,8 @@ def main():
     
     # Save configuration for reference
     config = vars(args)
-    config['timestamp'] = str(Path.ctime(Path.cwd()))
+    from datetime import datetime
+    config['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
     with open(os.path.join(args.output_dir, "prep_config.json"), 'w') as f:
         json.dump(config, f, indent=2)
