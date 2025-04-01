@@ -11,6 +11,7 @@ import json
 
 # Import our model and HAM10000 loader
 from unet_model import UNet
+from unet_encoder import UNetEncoder
 try:
     from attention_unet import AttentionUNet
 except ImportError:
