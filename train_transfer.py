@@ -14,7 +14,7 @@ import json
 from unet_model import UNet
 from attention_unet import AttentionUNet
 from cross_dataset_loader import create_cross_dataset_loaders
-from ham10000_loader import UNetEncoder
+from unet_encoder import UNetEncoder
 
 # Import loss functions and evaluation metrics from previous scripts
 from train_cross_dataset import DiceLoss, FocalLoss, EnhancedCombinedLoss, iou_score, evaluate_clinical_metrics
