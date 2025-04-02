@@ -246,7 +246,10 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
     vis_dir = ensure_dir(os.path.join(output_dir, "visualizations"))
     
     # Get transform for visualization
-    inv_transform = dataloader.dataset.transform.inverse
+    if hasattr(dataloader.dataset, 'dataset'):  # If it's a Subset
+        inv_transform = dataloader.dataset.dataset.transform.inverse
+    else:  # If it's the original dataset
+        inv_transform = dataloader.dataset.transform.inverse
     
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
