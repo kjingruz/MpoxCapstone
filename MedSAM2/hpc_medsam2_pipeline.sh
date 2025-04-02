@@ -224,27 +224,11 @@ if [ ${DO_FINETUNE} -eq 1 ]; then
         echo "Limited GPU memory detected, reducing batch size to ${BATCH_SIZE}"
     fi
 
-    CONFIG_DIR="/home/zhangk/Mpox/MedSAM2/sam2"
-    CONFIG_NAME="sam2.1_hiera_b+.yaml"
-    CONFIG_SOURCE="/home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/${CONFIG_NAME}"
-    
-    # Make sure the config directory exists
-    mkdir -p "${CONFIG_DIR}"
-    
-    # Remove existing symlink if it exists
-    if [ -L "${CONFIG_DIR}/${CONFIG_NAME}" ]; then
-        rm "${CONFIG_DIR}/${CONFIG_NAME}"
-    fi
-    
-    # Create a new symlink
-    ln -s "${CONFIG_SOURCE}" "${CONFIG_DIR}/${CONFIG_NAME}"
-    
-    # Run fine-tuning
     python ${SCRIPTS_DIR}/finetune_medsam2_mpox.py \
         --data_dir ${MPOX_DATA_DIR}/npy \
         --output_dir ${FINETUNE_OUTPUT_DIR} \
         --sam2_checkpoint ${SAM2_CHECKPOINT} \
-        --model_cfg "${CONFIG_NAME}" \
+        --model_cfg "sam2.1_hiera_b+.yaml" \
         --batch_size ${BATCH_SIZE} \
         --num_epochs 30 \
         --learning_rate 1e-5 \
