@@ -220,7 +220,7 @@ if [ ${DO_FINETUNE} -eq 1 ]; then
     # Set batch size based on available GPU memory
     BATCH_SIZE=4
     if [[ $(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1) -lt 16000 ]]; then
-        BATCH_SIZE=16
+        BATCH_SIZE=4
         echo "Limited GPU memory detected, reducing batch size to ${BATCH_SIZE}"
     fi
 
