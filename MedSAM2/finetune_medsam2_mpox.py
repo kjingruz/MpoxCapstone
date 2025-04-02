@@ -335,17 +335,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Fix model config path
-    if not os.path.isabs(args.model_cfg):
-        model_cfg_candidate = os.path.join(os.path.dirname(args.sam2_checkpoint), "../MedSAM2/sam2/configs/sam2.1", args.model_cfg)
-        if os.path.exists(model_cfg_candidate):
-            args.model_cfg = model_cfg_candidate
-        else:
-            # Try standard path
-            standard_path = f"/home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/{args.model_cfg}"
-            if os.path.exists(standard_path):
-                args.model_cfg = standard_path
-    
     print(f"Using model config: {args.model_cfg}")
     
     # Set up directories and seed
