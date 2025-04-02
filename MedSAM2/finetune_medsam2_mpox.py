@@ -245,12 +245,7 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
     model.eval()
     vis_dir = ensure_dir(os.path.join(output_dir, "visualizations"))
     
-    # Get transform for visualization
-    if hasattr(dataloader.dataset, 'dataset'):  # If it's a Subset
-        inv_transform = dataloader.dataset.dataset.transform.inverse
-    else:  # If it's the original dataset
-        inv_transform = dataloader.dataset.transform.inverse
-    
+    # Skip transform - we'll normalize the images directly
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
             if i >= num_samples:
@@ -259,7 +254,7 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
             images, masks, boxes, names = batch
             images, masks = images.to(device), masks.to(device)
             
-            # Forward pass - use boxes directly, not boxes.numpy()
+            # Forward pass
             mask_preds = model(images, boxes)
             pred_masks = (torch.sigmoid(mask_preds) > 0.5).float()
             
@@ -268,11 +263,14 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
                 if i*images.size(0) + j >= num_samples:
                     break
                 
-                # Get data for visualization
-                image = inv_transform(images[j].cpu()).permute(1, 2, 0).numpy()
+                # Get data for visualization - normalize the image directly
+                image = images[j].cpu().permute(1, 2, 0).numpy()
+                # Simple normalization for display
+                image = (image - image.min()) / (image.max() - image.min() + 1e-8)
+                
                 mask_gt = masks[j].cpu().squeeze().numpy()
                 mask_pred = pred_masks[j].cpu().squeeze().numpy()
-                box = boxes[j].numpy()  # Here we convert to numpy for visualization only
+                box = boxes[j].numpy()
                 name = names[j]
                 
                 # Create figure
