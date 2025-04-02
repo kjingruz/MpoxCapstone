@@ -218,8 +218,8 @@ def evaluate_model(model, dataloader, device):
             images, masks, boxes, _ = batch
             images, masks = images.to(device), masks.to(device)
             
-            # Forward pass
-            mask_preds = model(images, boxes.numpy())
+            # Forward pass - use boxes directly, not boxes.numpy()
+            mask_preds = model(images, boxes)
             
             # Convert predictions to binary masks
             pred_masks = (torch.sigmoid(mask_preds) > 0.5).float()
@@ -256,8 +256,8 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
             images, masks, boxes, names = batch
             images, masks = images.to(device), masks.to(device)
             
-            # Forward pass
-            mask_preds = model(images, boxes.numpy())
+            # Forward pass - use boxes directly, not boxes.numpy()
+            mask_preds = model(images, boxes)
             pred_masks = (torch.sigmoid(mask_preds) > 0.5).float()
             
             # Convert tensors to numpy
@@ -269,7 +269,7 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
                 image = inv_transform(images[j].cpu()).permute(1, 2, 0).numpy()
                 mask_gt = masks[j].cpu().squeeze().numpy()
                 mask_pred = pred_masks[j].cpu().squeeze().numpy()
-                box = boxes[j].numpy()
+                box = boxes[j].numpy()  # Here we convert to numpy for visualization only
                 name = names[j]
                 
                 # Create figure
@@ -301,6 +301,12 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
     print(f"Saved {num_samples} visualization samples to {vis_dir}")
 
 def main():
+
+    args.model_cfg = os.path.join(os.path.dirname(args.sam2_checkpoint), "../MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml")
+    if not os.path.exists(args.model_cfg):
+        args.model_cfg = "/home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml"
+    print(f"Using model config: {args.model_cfg}")
+    
     parser = argparse.ArgumentParser(description="Fine-tune SAM2 on Mpox lesion data")
     parser.add_argument("--data_dir", type=str, required=True,
                        help="Directory containing npy files with gts and imgs subfolders")
