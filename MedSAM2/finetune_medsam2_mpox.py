@@ -349,7 +349,10 @@ def main():
     import torch.nn as nn
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs!")
+        original_model = medsam2_model
         medsam2_model = nn.DataParallel(medsam2_model)
+    else:
+        original_model = medsam2_model
     medsam2_model.to(device)
     
     # Print model info
@@ -448,8 +451,8 @@ def main():
     
     # Setup optimizer and losses
     param_groups = [
-        {'params': medsam2_model.sam2_model.image_encoder.parameters()},
-        {'params': medsam2_model.sam2_model.sam_mask_decoder.parameters()}
+        {'params': original_model.sam2_model.image_encoder.parameters()},
+        {'params': original_model.sam2_model.sam_mask_decoder.parameters()}
     ]
     
     optimizer = torch.optim.AdamW(param_groups, lr=args.learning_rate, weight_decay=args.weight_decay)
