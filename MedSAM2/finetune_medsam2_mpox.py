@@ -308,8 +308,8 @@ def main():
                        help="Output directory for fine-tuned model")
     parser.add_argument("--sam2_checkpoint", type=str, required=True,
                        help="Path to SAM2 checkpoint file")
-    parser.add_argument("--model_cfg", type=str, default="sam2.1/sam2.1_hiera_b+",
-                       help="Hydra configuration for SAM2 model")
+    parser.add_argument("--model_cfg", type=str, default="sam2.1_hiera_b+.yaml",
+                       help="Path or name of model config file")
     parser.add_argument("--batch_size", type=int, default=16,
                        help="Batch size for training")
     parser.add_argument("--val_split", type=float, default=0.2,
