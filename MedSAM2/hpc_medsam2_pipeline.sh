@@ -224,14 +224,14 @@ if [ ${DO_FINETUNE} -eq 1 ]; then
         echo "Limited GPU memory detected, reducing batch size to ${BATCH_SIZE}"
     fi
 
-    ln -s /home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml /home/zhangk/Mpox/MedSAM2/sam2/sam2.1_hiera_b+.yaml
+    #ln -s /home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml /home/zhangk/Mpox/MedSAM2/sam2/sam2.1_hiera_b+.yaml
     
     # Run fine-tuning
     python ${SCRIPTS_DIR}/finetune_medsam2_mpox.py \
         --data_dir ${MPOX_DATA_DIR}/npy \
         --output_dir ${FINETUNE_OUTPUT_DIR} \
         --sam2_checkpoint ${SAM2_CHECKPOINT} \
-        --model_cfg "sam2.1_hiera_b+.yaml" \
+        --model_cfg "${BASE_DIR}/MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml" \
         --batch_size ${BATCH_SIZE} \
         --num_epochs 30 \
         --learning_rate 1e-5 \
