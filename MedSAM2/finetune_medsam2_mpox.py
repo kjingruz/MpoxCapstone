@@ -301,12 +301,6 @@ def visualize_predictions(model, dataloader, device, output_dir, num_samples=4):
     print(f"Saved {num_samples} visualization samples to {vis_dir}")
 
 def main():
-
-    args.model_cfg = os.path.join(os.path.dirname(args.sam2_checkpoint), "../MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml")
-    if not os.path.exists(args.model_cfg):
-        args.model_cfg = "/home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/sam2.1_hiera_b+.yaml"
-    print(f"Using model config: {args.model_cfg}")
-    
     parser = argparse.ArgumentParser(description="Fine-tune SAM2 on Mpox lesion data")
     parser.add_argument("--data_dir", type=str, required=True,
                        help="Directory containing npy files with gts and imgs subfolders")
@@ -340,6 +334,19 @@ def main():
                        help="Number of samples to visualize")
     
     args = parser.parse_args()
+    
+    # Fix model config path
+    if not os.path.isabs(args.model_cfg):
+        model_cfg_candidate = os.path.join(os.path.dirname(args.sam2_checkpoint), "../MedSAM2/sam2/configs/sam2.1", args.model_cfg)
+        if os.path.exists(model_cfg_candidate):
+            args.model_cfg = model_cfg_candidate
+        else:
+            # Try standard path
+            standard_path = f"/home/zhangk/Mpox/MedSAM2/sam2/configs/sam2.1/{args.model_cfg}"
+            if os.path.exists(standard_path):
+                args.model_cfg = standard_path
+    
+    print(f"Using model config: {args.model_cfg}")
     
     # Set up directories and seed
     set_seed(args.seed)
