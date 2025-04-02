@@ -139,7 +139,7 @@ class MedSAM2(nn.Module):
         
         Args:
             image: Tensor of shape (B, 3, 1024, 1024)
-            box: Array of shape (B, 4) with coordinates [x_min, y_min, x_max, y_max]
+            box: Tensor or Array of shape (B, 4) with coordinates [x_min, y_min, x_max, y_max]
         
         Returns:
             Mask logits of shape (B, 1, 256, 256)
@@ -149,7 +149,12 @@ class MedSAM2(nn.Module):
         
         # Process boxes into SAM2 format (no gradients for prompt encoder)
         with torch.no_grad():
-            box_torch = torch.as_tensor(box, dtype=torch.float32, device=image.device)
+            # Ensure box is a tensor with the right device
+            if not isinstance(box, torch.Tensor):
+                box_torch = torch.as_tensor(box, dtype=torch.float32, device=image.device)
+            else:
+                box_torch = box.to(device=image.device)
+                
             if len(box_torch.shape) == 2:
                 box_coords = box_torch.reshape(-1, 2, 2)  # (B, 4) to (B, 2, 2)
                 box_labels = torch.tensor([[2, 3]], dtype=torch.int, device=image.device)
@@ -496,7 +501,7 @@ def main():
                 
                 # Forward pass
                 optimizer.zero_grad()
-                mask_preds = medsam2_model(images, boxes.numpy())
+                mask_preds = medsam2_model(images, boxes)
                 
                 # Calculate loss (Dice + BCE)
                 loss = dice_loss(mask_preds, masks) + ce_loss(mask_preds, masks)
